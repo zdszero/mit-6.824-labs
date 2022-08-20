@@ -49,7 +49,7 @@ func Worker(mapf func(string, string) []KeyValue,
 	// CallExample()
 	for {
 		t := CallGetTask()
-		switch t.TastType {
+		switch t.TaskType {
 		case MAP_TASK:
 			mapWorker(mapf, t)
 		case REDUCE_TASK:
@@ -59,7 +59,7 @@ func Worker(mapf func(string, string) []KeyValue,
 		case DONE_TASK:
 			break
 		default:
-			log.Fatalf("Worker Error: unknown task type %d", t.TastType)
+			log.Fatalf("Worker Error: unknown task type %d", t.TaskType)
 		}
 	}
 }
@@ -96,7 +96,7 @@ func mapWorker(mapf func(string, string) []KeyValue, t Task) {
 			log.Fatalf("rename file %v failed", ifile.Name())
 		}
 	}
-	log.Printf("Worker: finish map on file %d\n", t.FileIndex)
+	log.Printf("Worker: map %d finish\n", t.FileIndex)
 	CallTaskDone(t)
 }
 
@@ -148,7 +148,7 @@ func reduceWorker(reducef func(string, []string) string, t Task) {
 	if err != nil {
 		log.Fatalf("rename file %v failed", ofile.Name())
 	}
-	log.Printf("Worker: finish reduce on part %d\n", t.PartIndex)
+	log.Printf("Worker: reduce %d finish\n", t.PartIndex)
 	CallTaskDone(t)
 }
 

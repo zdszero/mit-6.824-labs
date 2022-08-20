@@ -11,6 +11,10 @@ import (
 
 var Phase = MAP_TASK
 
+const (
+	RUNNING_TIME_LIMIT = time.Second * 10
+)
+
 type Master struct {
 	// Your definitions here.
 	mapWaiting    TaskQueue
@@ -37,52 +41,75 @@ func (m *Master) Example(args *ExampleArgs, reply *ExampleReply) error {
 
 func (m *Master) GetTask(args *ExampleArgs, t *Task) error {
 	if m.isDone {
-		t.TastType = DONE_TASK
+		t.TaskType = DONE_TASK
 		return nil
 	}
 	if !m.mapWaiting.Empty() {
 		*t = m.mapWaiting.Pop()
 		m.mapRunning.Add(*t)
-		log.Printf("Master: assign map task on file %v: %v to worker\n", t.FileIndex, t.Filename)
+		go m.checkTimeout(t)
+		log.Printf("Master: assign map %v\n", t.FileIndex)
 		return nil
 	}
 	if !m.reduceWaiting.Empty() {
 		*t = m.reduceWaiting.Pop()
 		m.reduceRunning.Add(*t)
-		log.Printf("Master: assign reduce task on part %v to worker\n", t.PartIndex)
+		go m.checkTimeout(t)
+		log.Printf("Master: assign reduce %v\n", t.PartIndex)
 		return nil
 	}
 	// all tasks are running
-	t.TastType = WAIT_TASK
+	t.TaskType = WAIT_TASK
 	return nil
 }
 
 func (m *Master) TaskDone(t *Task, reply *ExampleReply) error {
-	switch t.TastType {
+	switch t.TaskType {
 	case MAP_TASK:
-		log.Printf("Master: map task on file %d: %v has completed\n", t.FileIndex, t.Filename)
-		m.mapRunning.Remove(*t)
+		ret := m.mapRunning.Remove(*t)
+		if ret == false {
+			log.Fatalln("Master Error: fail to remove when task is done")
+		}
 		if m.mapWaiting.Empty() && m.mapRunning.Empty() {
-			log.Println("Master: distribute reduce tasks")
+			log.Println("Master: REDUCE PHASE")
 			m.distributeReduce()
 		}
 	case REDUCE_TASK:
-		log.Printf("Master: map task on part %d has completed\n", t.PartIndex)
-		m.reduceRunning.Remove(*t)
+		ret := m.reduceRunning.Remove(*t)
+		if ret == false {
+			log.Fatalln("Master Error: fail to remove when task is done")
+		}
 		if m.reduceWaiting.Empty() && m.reduceRunning.Empty() {
-			log.Println("Master: is done")
+			log.Println("Master: done")
 			m.isDone = true
 		}
 	default:
-		log.Fatalf("Master Error: unknown task type %d\n", t.TastType)
+		log.Fatalf("Master Error: unknown task type %d\n", t.TaskType)
 	}
 	return nil
 }
 
+func (m *Master) checkTimeout(t *Task) {
+	if t.TaskType == MAP_TASK {
+		time.Sleep(RUNNING_TIME_LIMIT)
+		inQueue := m.mapRunning.Remove(*t)
+		if inQueue == true {
+			log.Printf("Master: map %d timeout", t.FileIndex)
+			m.mapWaiting.Add(*t)
+		}
+	} else if t.TaskType == REDUCE_TASK {
+		time.Sleep(RUNNING_TIME_LIMIT)
+		inQueue := m.reduceRunning.Remove(*t)
+		if inQueue == true {
+			log.Printf("Master: reduce %d timeout", t.PartIndex)
+			m.reduceWaiting.Add(*t)
+		}
+	}
+}
+
 func (m *Master) distributeReduce() {
 	reduceTask := Task{
-		TastType:  REDUCE_TASK,
-		BeginTime: time.Now(),
+		TaskType:  REDUCE_TASK,
 		NReduce:   m.nReduce,
 		NFiles:    m.nFiles,
 	}
@@ -118,32 +145,14 @@ func (m *Master) Done() bool {
 	return m.isDone
 }
 
-func (m *Master) collectTimeOut() {
-	for {
-		time.Sleep(5 * time.Second)
-		var array []Task
-		if Phase == MAP_TASK {
-			array = m.mapRunning.TimeOutTasks()
-			for _, t := range array {
-				log.Printf("Master: map task %v on file %v times out", t.FileIndex, t.Filename)
-				m.mapWaiting.Add(t)
-			}
-		} else {
-			array = m.reduceRunning.TimeOutTasks()
-			for _, t := range array {
-				log.Printf("Master: reduce task %v on file %v times out", t.FileIndex, t.Filename)
-				m.reduceWaiting.Add(t)
-			}
-		}
-	}
-}
-
 //
 // create a Master.
 // main/mrmaster.go calls this function.
 // nReduce is the number of reduce tasks to use.
 //
 func MakeMaster(files []string, nReduce int) *Master {
+	log.Printf("map tasks: %d, reduce tasks: %d\n", len(files), nReduce)
+
 	m := Master{
 		mapWaiting:    TaskQueue{},
 		mapRunning:    TaskQueue{},
@@ -154,14 +163,10 @@ func MakeMaster(files []string, nReduce int) *Master {
 		isDone:        false,
 	}
 
-	// Your code here.
-
 	// add all files to map task
-	log.Println("Master: add all map task to task queue")
 	for fileIdx, filename := range files {
 		m.mapWaiting.Add(Task{
-			TastType:  MAP_TASK,
-			BeginTime: time.Now(),
+			TaskType:  MAP_TASK,
 			Filename:  filename,
 			FileIndex: fileIdx,
 			PartIndex: -1,
@@ -170,7 +175,6 @@ func MakeMaster(files []string, nReduce int) *Master {
 		})
 	}
 
-	go m.collectTimeOut()
 	m.server()
 	return &m
 }
