@@ -11,10 +11,17 @@ package raft
 
 import "sync"
 
+type LogEntry struct {
+	commandIndex int
+	command      struct{}
+}
+
 type Persister struct {
-	mu        sync.Mutex
-	raftstate []byte
-	snapshot  []byte
+	mu          sync.Mutex
+	raftstate   []byte
+	snapshot    []byte
+	currentTerm int
+	votedFor    int
 }
 
 func MakePersister() *Persister {
