@@ -12,8 +12,9 @@ package raft
 import "sync"
 
 type LogEntry struct {
-	commandIndex int
-	command      struct{}
+	Term     int
+	LogIndex int
+	Command  interface{}
 }
 
 type Persister struct {
@@ -22,6 +23,7 @@ type Persister struct {
 	snapshot    []byte
 	currentTerm int
 	votedFor    int
+	logs        []LogEntry
 }
 
 func MakePersister() *Persister {
