@@ -406,16 +406,24 @@ func (rf *Raft) setCommitIndex(commitIndex int) {
 	}
 	rf.commitIndex = commitIndex
 	rf.dprintf("commitIndex = %d", rf.commitIndex)
-	for i := rf.lastApplied + 1; i <= rf.commitIndex; i++ {
-		msg := ApplyMsg{
-			CommandValid: true,
-			Command:      rf.persister.logs[i].Command,
-			CommandIndex: i,
+}
+
+func (rf *Raft) applyCommands() {
+	for {
+		if rf.lastApplied < rf.commitIndex {
+			for i := rf.lastApplied + 1; i <= rf.commitIndex; i++ {
+				msg := ApplyMsg{
+					CommandValid: true,
+					Command:	  rf.persister.logs[i].Command,
+					CommandIndex: i,
+				}
+				rf.dprintf("apply %d", i)
+				rf.applyCh <- msg
+			}
+			rf.lastApplied = rf.commitIndex
 		}
-		rf.dprintf("apply %d", i)
-		rf.applyCh <- msg
+		time.Sleep(time.Millisecond * 100)
 	}
-	rf.lastApplied = rf.commitIndex
 }
 
 //
@@ -512,6 +520,7 @@ func (rf *Raft) killed() bool {
 
 func (rf *Raft) mainRoutine() {
 	rf.dprintf("")
+	go rf.applyCommands()
 	for {
 		switch rf.state {
 		case Follower:
