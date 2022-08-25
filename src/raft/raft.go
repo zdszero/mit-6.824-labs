@@ -270,6 +270,7 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 	rf.persister.logs = rf.persister.logs[:args.PrevLogIndex+1]
 	rf.persister.logs = append(rf.persister.logs, args.Entry)
 	rf.matchIndex[args.LeaderId] = args.Entry.LogIndex
+	rf.matchIndex[rf.me] = args.Entry.LogIndex
 	for i := 0; i < len(rf.peers); i++ {
 		rf.nextIndex[i] = len(rf.persister.logs)
 	}
@@ -306,7 +307,7 @@ func (rf *Raft) sendAppendEntries(server int, args *AppendEntriesArgs, reply *Ap
 	prevIndex := args.PrevLogIndex
 	ok := rf.peers[server].Call("Raft.AppendEntries", args, reply)
 	if !args.IsHeartbeat {
-		rf.dprintf("->(AE) [%d] %v: prevTerm %d, prevIndex %d", server, reply.Success, prevTerm, prevIndex)
+		rf.dprintf("->[%d](%v) %v: prevTerm %d, prevIndex %d", server, args.Entry.Command, reply.Success, prevTerm, prevIndex)
 	}
 	rf.mu.Lock()
 	defer rf.mu.Unlock()
@@ -343,6 +344,7 @@ func (rf *Raft) sendLogEntry(server int, args AppendEntriesArgs, reply AppendEnt
 		}
 	}
 	rf.matchIndex[server] = rf.nextIndex[server]
+	rf.dprintf("matchIndex[%d] = %d", server, rf.matchIndex[server])
 	for rf.nextIndex[server]++; rf.nextIndex[server] < len(rf.persister.logs); rf.nextIndex[server]++ {
 		args.PrevLogIndex = rf.nextIndex[server] - 1
 		args.PrevLogTerm = rf.getPrevLogTerm(args.PrevLogIndex)
@@ -355,8 +357,8 @@ func (rf *Raft) sendLogEntry(server int, args AppendEntriesArgs, reply AppendEnt
 			log.Fatalln("Error: AppendEntry RPC fails")
 		}
 		rf.matchIndex[server] = rf.nextIndex[server]
+		rf.dprintf("matchIndex[%d] = %d", server, rf.matchIndex[server])
 	}
-	rf.dprintf("matchIndex[%d] = %d", server, rf.matchIndex[server])
 	if rf.majorityMatched(rf.matchIndex[server]) {
 		rf.setCommitIndex(rf.matchIndex[server])
 		go rf.sendHeartbeat(server)
