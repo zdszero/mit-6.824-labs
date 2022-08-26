@@ -182,6 +182,7 @@ type RequestVoteReply struct {
 }
 
 type AppendEntriesArgs struct {
+	IsHeartbeat  bool
 	Term         int
 	LeaderId     int
 	LeaderCommit int
@@ -259,13 +260,16 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 		rf.leaderFoundCh <- struct{}{}
 		rf.dprintf("recv heartbeat, convert to follower")
 	}
+	if args.IsHeartbeat {
+		if args.LeaderCommit > rf.commitIndex {
+			rf.setCommitIndex(min(args.LeaderCommit, len(rf.persister.logs)-1))
+		}
+		return
+	}
 	if args.PrevLogIndex >= 0 {
 		lastLogIndex := len(rf.persister.logs) - 1
 		if lastLogIndex < args.PrevLogIndex || rf.persister.logs[args.PrevLogIndex].Term != args.PrevLogTerm {
 			return
-		}
-		if args.LeaderCommit > rf.commitIndex {
-			rf.setCommitIndex(min(args.LeaderCommit, len(rf.persister.logs)-1))
 		}
 		if lastLogIndex >= args.PrevLogIndex+1 && rf.persister.logs[args.PrevLogIndex+1].Term == args.Entry.Term {
 			reply.Success = true
@@ -370,50 +374,33 @@ func (rf *Raft) sendLogEntry(server int, args AppendEntriesArgs, reply AppendEnt
 		}
 		rf.matchIndex[server] = nextIndex[server]
 	}
-	// rf.dprintf("matchIndex[%d] = %d", server, rf.matchIndex[server])
+	rf.dprintf("matchIndex[%d] = %d", server, rf.matchIndex[server])
 	if rf.majorityMatched(rf.matchIndex[server]) {
 		rf.setCommitIndex(rf.matchIndex[server])
-		for i := 0; i < len(rf.peers); i++ {
-			if i == rf.me {
-				continue
-			}
-			go rf.sendHeartbeat(i)
-		}
 	}
 	return ok
 }
 
 func (rf *Raft) sendHeartbeat(server int) {
-	var args *AppendEntriesArgs
-	if len(rf.persister.logs) >= 2 {
-		prevLogIndex := len(rf.persister.logs) - 2
-		prevLogTerm := rf.getLogTerm(prevLogIndex)
-		args = &AppendEntriesArgs{
-			Term:         rf.persister.currentTerm,
-			LeaderId:     rf.me,
-			LeaderCommit: rf.commitIndex,
-			PrevLogIndex: prevLogIndex,
-			PrevLogTerm:  prevLogTerm,
-			Entry:        rf.persister.logs[len(rf.persister.logs)-1],
-		}
-	} else {
-		args = &AppendEntriesArgs{
-			Term:         rf.persister.currentTerm,
-			LeaderId:     rf.me,
-			LeaderCommit: rf.commitIndex,
-			PrevLogIndex: -1,
-			PrevLogTerm:  -1,
-		}
+	commitIndex := -1
+	if rf.matchIndex[server] >= rf.commitIndex {
+		commitIndex = rf.commitIndex
+	}
+	args := &AppendEntriesArgs{
+		IsHeartbeat:  true,
+		Term:         rf.persister.currentTerm,
+		LeaderId:     rf.me,
+		LeaderCommit: commitIndex,
 	}
 	reply := &AppendEntriesReply{}
-	rf.sendAppendEntries(server, args, reply)
+	go rf.sendAppendEntries(server, args, reply)
 }
 
 func (rf *Raft) majorityMatched(n int) bool {
 	rf.mu.Lock()
 	defer rf.mu.Unlock()
 	// already committed
-	if n <= rf.commitIndex {
+	if n < rf.commitIndex {
 		return false
 	}
 	cnt := 0
@@ -499,12 +486,12 @@ func (rf *Raft) Start(command interface{}) (int, int, bool) {
 		prevLogIndex := len(rf.persister.logs) - 2
 		prevLogTerm := rf.getLogTerm(prevLogIndex)
 		args := AppendEntriesArgs{
+			IsHeartbeat:  false,
 			Term:         rf.persister.currentTerm,
 			LeaderId:     rf.me,
 			PrevLogIndex: prevLogIndex,
 			PrevLogTerm:  prevLogTerm,
 			Entry:        entry,
-			LeaderCommit: rf.commitIndex,
 		}
 		reply := AppendEntriesReply{}
 		go rf.sendLogEntry(server, args, reply)
@@ -675,7 +662,7 @@ func Make(peers []*labrpc.ClientEnd, me int,
 	rf.persister.logs = append(rf.persister.logs, LogEntry{
 		Term:     0,
 		LogIndex: 0,
-		Command:  0,
+		Command:  struct{}{},
 	})
 	for i := 0; i < len(peers); i++ {
 		// TODO
