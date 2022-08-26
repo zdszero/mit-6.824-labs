@@ -114,8 +114,9 @@ func (rf *Raft) dprintf(format string, a ...interface{}) {
 	var args []interface{}
 	args = append(args, rf.me)
 	args = append(args, rf.role())
+	args = append(args, rf.persister.currentTerm)
 	args = append(args, a...)
-	DPrintf("[%d](%-9s) "+format, args...)
+	DPrintf("[%d](%-9s){%3d} "+format, args...)
 }
 
 // return currentTerm and whether this server
@@ -204,6 +205,7 @@ func (rf *Raft) RequestVote(args *RequestVoteArgs, reply *RequestVoteReply) {
 	reply.Term = rf.persister.currentTerm
 	reply.VotedGranted = false
 	if args.Term < rf.persister.currentTerm {
+		rf.dprintf("reject %d: lower term", args.CandiateId)
 		return
 	} else if args.Term > rf.persister.currentTerm {
 		rf.persister.currentTerm = args.Term
@@ -220,7 +222,8 @@ func (rf *Raft) RequestVote(args *RequestVoteArgs, reply *RequestVoteReply) {
 	// log completeness check
 	lastLogIndex := len(rf.persister.logs) - 1
 	lastLogTerm := rf.persister.logs[len(rf.persister.logs)-1].Term
-	if lastLogTerm > args.LastLogIndex || (lastLogTerm == args.LastLogTerm && lastLogIndex > args.LastLogIndex) {
+	if lastLogTerm > args.LastLogTerm || (lastLogTerm == args.LastLogTerm && lastLogIndex > args.LastLogIndex) {
+		rf.dprintf("reject %d: inconsistent log", args.CandiateId)
 		return
 	}
 	rf.persister.votedFor = args.CandiateId
@@ -228,7 +231,7 @@ func (rf *Raft) RequestVote(args *RequestVoteArgs, reply *RequestVoteReply) {
 		rf.stopTimer()
 		rf.resetTimer()
 	}
-	// rf.dprintf("vote for %d in term %d", rf.persister.votedFor, rf.persister.currentTerm)
+	rf.dprintf("grant %d", args.CandiateId)
 	reply.VotedGranted = true
 }
 
@@ -275,6 +278,7 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 	}
 	rf.persister.logs = rf.persister.logs[:args.PrevLogIndex+1]
 	rf.persister.logs = append(rf.persister.logs, args.Entry)
+	rf.dprintf("APPEND %3d{%3d}: %v", args.Entry.LogIndex, args.Entry.Term, args.Entry.Command)
 	rf.matchIndex[args.LeaderId] = args.Entry.LogIndex
 	rf.matchIndex[rf.me] = args.Entry.LogIndex
 	for i := 0; i < len(rf.peers); i++ {
@@ -366,10 +370,15 @@ func (rf *Raft) sendLogEntry(server int, args AppendEntriesArgs, reply AppendEnt
 		}
 		rf.matchIndex[server] = nextIndex[server]
 	}
-	rf.dprintf("matchIndex[%d] = %d", server, rf.matchIndex[server])
+	// rf.dprintf("matchIndex[%d] = %d", server, rf.matchIndex[server])
 	if rf.majorityMatched(rf.matchIndex[server]) {
 		rf.setCommitIndex(rf.matchIndex[server])
-		go rf.sendHeartbeat(server)
+		for i := 0; i < len(rf.peers); i++ {
+			if i == rf.me {
+				continue
+			}
+			go rf.sendHeartbeat(i)
+		}
 	}
 	return ok
 }
@@ -425,7 +434,7 @@ func (rf *Raft) setCommitIndex(commitIndex int) {
 		return
 	}
 	rf.commitIndex = commitIndex
-	rf.dprintf("commitIndex = %d", rf.commitIndex)
+	// rf.dprintf("commitIndex = %d", rf.commitIndex)
 }
 
 func (rf *Raft) applyCommands() {
@@ -437,7 +446,7 @@ func (rf *Raft) applyCommands() {
 					Command:      rf.persister.logs[i].Command,
 					CommandIndex: i,
 				}
-				rf.dprintf("apply %d", i)
+				rf.dprintf(" APPLY %3d{%3d}: %v", i, rf.persister.logs[i].Term, msg.Command)
 				rf.applyCh <- msg
 			}
 			rf.lastApplied = rf.commitIndex
@@ -471,7 +480,7 @@ func (rf *Raft) Start(command interface{}) (int, int, bool) {
 	if rf.state != Leader {
 		return index, term, false
 	}
-	rf.dprintf("start %v index %d", command, len(rf.persister.logs))
+	rf.dprintf(" START %3d{%3d}: %v", len(rf.persister.logs), rf.persister.currentTerm, command)
 	entry := LogEntry{
 		Term:     rf.persister.currentTerm,
 		LogIndex: len(rf.persister.logs),
@@ -482,7 +491,7 @@ func (rf *Raft) Start(command interface{}) (int, int, bool) {
 	// }
 	rf.persister.logs = append(rf.persister.logs, entry)
 	rf.matchIndex[rf.me]++
-	rf.dprintf("matchIndex[%d] = %d", rf.me, rf.matchIndex[rf.me])
+	// rf.dprintf("matchIndex[%d] = %d", rf.me, rf.matchIndex[rf.me])
 	for server := 0; server < len(rf.peers); server++ {
 		if server == rf.me {
 			continue
@@ -666,7 +675,7 @@ func Make(peers []*labrpc.ClientEnd, me int,
 	rf.persister.logs = append(rf.persister.logs, LogEntry{
 		Term:     0,
 		LogIndex: 0,
-		Command:  struct{}{},
+		Command:  0,
 	})
 	for i := 0; i < len(peers); i++ {
 		// TODO
