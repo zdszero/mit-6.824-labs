@@ -188,7 +188,7 @@ type AppendEntriesArgs struct {
 	LeaderCommit int
 	PrevLogIndex int
 	PrevLogTerm  int
-	Entry        LogEntry
+	Entries      []LogEntry
 }
 
 type AppendEntriesReply struct {
@@ -271,24 +271,46 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 		if lastLogIndex < args.PrevLogIndex || rf.persister.logs[args.PrevLogIndex].Term != args.PrevLogTerm {
 			return
 		}
-		if lastLogIndex >= args.PrevLogIndex+1 && rf.persister.logs[args.PrevLogIndex+1].Term == args.Entry.Term {
+		// lastLogIndex >= PrevLogIndex
+
+		// a1: new entries
+		// a2: old entries after prevLogIndex
+		isPrefix := func(a1 []LogEntry, a2 []LogEntry, diff_index *int) bool {
+			min_len := min(len(a1), len(a2))
+			for i := 0; i < min_len; i++ {
+				if a1[i].LogIndex == a2[i].LogIndex && a1[i].Term == a2[i].Term {
+					continue
+				} else {
+					*diff_index = i
+					return false
+				}
+			}
+			if len(a1) <= len(a2) {
+				return true
+			}
+			*diff_index = len(a2)
+			return false
+		}
+		diff_index := -1
+		if isPrefix(args.Entries, rf.persister.logs[args.PrevLogIndex+1:], &diff_index) {
 			reply.Success = true
 			return
 		}
+		rf.persister.logs = rf.persister.logs[:args.PrevLogIndex+1+diff_index]
+		rf.persister.logs = append(rf.persister.logs, args.Entries[diff_index:]...)
+		for _, e := range args.Entries[diff_index:] {
+			rf.dprintf("APPEND %3d{%3d}: %v", e.LogIndex, e.Term, e.Command)
+		}
+		rf.matchIndex[args.LeaderId] = len(rf.persister.logs) - 1
+		rf.matchIndex[rf.me] = len(rf.persister.logs) - 1
+		for i := 0; i < len(rf.peers); i++ {
+			rf.nextIndex[i] = len(rf.persister.logs)
+		}
+		reply.Success = true
 	} else {
 		// initial heartbeat
 		reply.Success = true
-		return
 	}
-	rf.persister.logs = rf.persister.logs[:args.PrevLogIndex+1]
-	rf.persister.logs = append(rf.persister.logs, args.Entry)
-	rf.dprintf("APPEND %3d{%3d}: %v", args.Entry.LogIndex, args.Entry.Term, args.Entry.Command)
-	rf.matchIndex[args.LeaderId] = args.Entry.LogIndex
-	rf.matchIndex[rf.me] = args.Entry.LogIndex
-	for i := 0; i < len(rf.peers); i++ {
-		rf.nextIndex[i] = len(rf.persister.logs)
-	}
-	reply.Success = true
 }
 
 func (rf *Raft) sendRequestVote(server int, args *RequestVoteArgs, reply *RequestVoteReply) bool {
@@ -353,7 +375,7 @@ func (rf *Raft) sendLogEntry(server int, args AppendEntriesArgs, reply AppendEnt
 		nextIndex[server]--
 		args.PrevLogIndex = nextIndex[server] - 1
 		args.PrevLogTerm = rf.getLogTerm(args.PrevLogIndex)
-		args.Entry = rf.persister.logs[nextIndex[server]]
+		args.Entries = rf.persister.logs[nextIndex[server]:]
 		ok = rf.sendAppendEntries(server, &args, &reply)
 		// leader become follower
 		if !ok {
@@ -364,7 +386,7 @@ func (rf *Raft) sendLogEntry(server int, args AppendEntriesArgs, reply AppendEnt
 	for nextIndex[server]++; nextIndex[server] < len(rf.persister.logs); nextIndex[server]++ {
 		args.PrevLogIndex = nextIndex[server] - 1
 		args.PrevLogTerm = rf.getLogTerm(args.PrevLogIndex)
-		args.Entry = rf.persister.logs[nextIndex[server]]
+		args.Entries = rf.persister.logs[nextIndex[server]:]
 		ok = rf.sendAppendEntries(server, &args, &reply)
 		if !ok {
 			return false
@@ -374,7 +396,7 @@ func (rf *Raft) sendLogEntry(server int, args AppendEntriesArgs, reply AppendEnt
 		}
 		rf.matchIndex[server] = nextIndex[server]
 	}
-	rf.dprintf("matchIndex[%d] = %d", server, rf.matchIndex[server])
+	// rf.dprintf("matchIndex[%d] = %d", server, rf.matchIndex[server])
 	if rf.majorityMatched(rf.matchIndex[server]) {
 		rf.setCommitIndex(rf.matchIndex[server])
 	}
@@ -491,7 +513,7 @@ func (rf *Raft) Start(command interface{}) (int, int, bool) {
 			LeaderId:     rf.me,
 			PrevLogIndex: prevLogIndex,
 			PrevLogTerm:  prevLogTerm,
-			Entry:        entry,
+			Entries:      rf.persister.logs[prevLogIndex+1:],
 		}
 		reply := AppendEntriesReply{}
 		go rf.sendLogEntry(server, args, reply)
