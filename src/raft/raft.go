@@ -362,40 +362,24 @@ func (rf *Raft) sendAppendEntries(server int, args *AppendEntriesArgs, reply *Ap
 	return ok
 }
 
-func (rf *Raft) sendLogEntry(server int, args AppendEntriesArgs, reply AppendEntriesReply) bool {
-	nextIndex := make([]int, len(rf.peers))
-	for i := 0; i < len(rf.peers); i++ {
-		nextIndex[i] = args.PrevLogIndex + 1
-	}
+func (rf *Raft) sendLogEntries(server int, args AppendEntriesArgs, reply AppendEntriesReply) bool {
+	nextIndex := args.PrevLogIndex + 1
 	ok := rf.sendAppendEntries(server, &args, &reply)
 	if !ok {
 		return false
 	}
 	for !reply.Success {
-		nextIndex[server]--
-		args.PrevLogIndex = nextIndex[server] - 1
+		nextIndex--
+		args.PrevLogIndex = nextIndex - 1
 		args.PrevLogTerm = rf.getLogTerm(args.PrevLogIndex)
-		args.Entries = rf.persister.logs[nextIndex[server]:]
+		args.Entries = rf.persister.logs[nextIndex:]
 		ok = rf.sendAppendEntries(server, &args, &reply)
 		// leader become follower
 		if !ok {
 			return false
 		}
 	}
-	rf.matchIndex[server] = nextIndex[server]
-	for nextIndex[server]++; nextIndex[server] < len(rf.persister.logs); nextIndex[server]++ {
-		args.PrevLogIndex = nextIndex[server] - 1
-		args.PrevLogTerm = rf.getLogTerm(args.PrevLogIndex)
-		args.Entries = rf.persister.logs[nextIndex[server]:]
-		ok = rf.sendAppendEntries(server, &args, &reply)
-		if !ok {
-			return false
-		}
-		if !reply.Success {
-			log.Fatalln("Error: AppendEntry RPC fails")
-		}
-		rf.matchIndex[server] = nextIndex[server]
-	}
+	rf.matchIndex[server] = len(rf.persister.logs) - 1
 	// rf.dprintf("matchIndex[%d] = %d", server, rf.matchIndex[server])
 	if rf.majorityMatched(rf.matchIndex[server]) {
 		rf.setCommitIndex(rf.matchIndex[server])
@@ -516,7 +500,7 @@ func (rf *Raft) Start(command interface{}) (int, int, bool) {
 			Entries:      rf.persister.logs[prevLogIndex+1:],
 		}
 		reply := AppendEntriesReply{}
-		go rf.sendLogEntry(server, args, reply)
+		go rf.sendLogEntries(server, args, reply)
 	}
 	index = len(rf.persister.logs) - 1
 	term = rf.persister.currentTerm
