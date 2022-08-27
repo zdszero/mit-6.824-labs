@@ -7,12 +7,14 @@ test_times=$2
 all_passed=1
 
 for (( i = 0; i < $test_times; i++ )); do
-  go test -run $test_name &> /dev/null
+  go test -run $test_name > /tmp/out
   if [[ $? -ne 0 ]]; then
     echo "${i} check not passed"
     all_passed=0
+    break
   else
     echo "${i} check passed"
+    rm /tmp/out
   fi
 done
 

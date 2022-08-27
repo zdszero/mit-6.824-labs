@@ -86,6 +86,7 @@ type Raft struct {
 	lastApplied int
 	nextIndex   []int
 	matchIndex  []int
+	cond        *sync.Cond
 }
 
 func (rf *Raft) resetTimer() {
@@ -303,6 +304,7 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 		}
 		rf.matchIndex[args.LeaderId] = len(rf.persister.logs) - 1
 		rf.matchIndex[rf.me] = len(rf.persister.logs) - 1
+		// rf.dprintf("(peer) matchIndex[%d] = %d", rf.me, len(rf.persister.logs)-1)
 		for i := 0; i < len(rf.peers); i++ {
 			rf.nextIndex[i] = len(rf.persister.logs)
 		}
@@ -362,9 +364,9 @@ func (rf *Raft) sendAppendEntries(server int, args *AppendEntriesArgs, reply *Ap
 	return ok
 }
 
-func (rf *Raft) sendLogEntries(server int, args AppendEntriesArgs, reply AppendEntriesReply) bool {
+func (rf *Raft) sendLogEntries(server int, args *AppendEntriesArgs, reply *AppendEntriesReply) bool {
 	nextIndex := args.PrevLogIndex + 1
-	ok := rf.sendAppendEntries(server, &args, &reply)
+	ok := rf.sendAppendEntries(server, args, reply)
 	if !ok {
 		return false
 	}
@@ -373,18 +375,43 @@ func (rf *Raft) sendLogEntries(server int, args AppendEntriesArgs, reply AppendE
 		args.PrevLogIndex = nextIndex - 1
 		args.PrevLogTerm = rf.getLogTerm(args.PrevLogIndex)
 		args.Entries = rf.persister.logs[nextIndex:]
-		ok = rf.sendAppendEntries(server, &args, &reply)
+		ok = rf.sendAppendEntries(server, args, reply)
 		// leader become follower
 		if !ok {
 			return false
 		}
 	}
-	rf.matchIndex[server] = len(rf.persister.logs) - 1
+	rf.matchIndex[server] += len(args.Entries)
 	// rf.dprintf("matchIndex[%d] = %d", server, rf.matchIndex[server])
 	if rf.majorityMatched(rf.matchIndex[server]) {
 		rf.setCommitIndex(rf.matchIndex[server])
 	}
 	return ok
+}
+
+func (rf *Raft) sendToPeer(server int) {
+	for {
+		if rf.state != Leader {
+			break
+		}
+		rf.cond.L.Lock()
+		for rf.matchIndex[server] >= len(rf.persister.logs)-1 {
+			rf.cond.Wait()
+		}
+		rf.cond.L.Unlock()
+		prevLogIndex := rf.matchIndex[server]
+		prevLogTerm := rf.getLogTerm(prevLogIndex)
+		args := &AppendEntriesArgs{
+			IsHeartbeat:  false,
+			Term:         rf.persister.currentTerm,
+			LeaderId:     rf.me,
+			PrevLogIndex: prevLogIndex,
+			PrevLogTerm:  prevLogTerm,
+			Entries:      rf.persister.logs[rf.matchIndex[server]+1:],
+		}
+		reply := &AppendEntriesReply{}
+		rf.sendLogEntries(server, args, reply)
+	}
 }
 
 func (rf *Raft) sendHeartbeat(server int) {
@@ -409,9 +436,11 @@ func (rf *Raft) majorityMatched(n int) bool {
 	if n < rf.commitIndex {
 		return false
 	}
+	if rf.persister.logs[n].Term != rf.persister.currentTerm {
+		return false
+	}
 	cnt := 0
 	for i := 0; i < len(rf.matchIndex); i++ {
-		// DPrintf("matchIndex[%d][%d] = %d", rf.me, i, rf.matchIndex[i])
 		if rf.matchIndex[i] >= n {
 			cnt++
 		}
@@ -479,29 +508,11 @@ func (rf *Raft) Start(command interface{}) (int, int, bool) {
 		LogIndex: len(rf.persister.logs),
 		Command:  command,
 	}
-	// for i := 0; i < len(rf.peers); i++ {
-	// 	rf.nextIndex[i] = len(rf.persister.logs)
-	// }
 	rf.persister.logs = append(rf.persister.logs, entry)
 	rf.matchIndex[rf.me]++
-	// rf.dprintf("matchIndex[%d] = %d", rf.me, rf.matchIndex[rf.me])
-	for server := 0; server < len(rf.peers); server++ {
-		if server == rf.me {
-			continue
-		}
-		prevLogIndex := len(rf.persister.logs) - 2
-		prevLogTerm := rf.getLogTerm(prevLogIndex)
-		args := AppendEntriesArgs{
-			IsHeartbeat:  false,
-			Term:         rf.persister.currentTerm,
-			LeaderId:     rf.me,
-			PrevLogIndex: prevLogIndex,
-			PrevLogTerm:  prevLogTerm,
-			Entries:      rf.persister.logs[prevLogIndex+1:],
-		}
-		reply := AppendEntriesReply{}
-		go rf.sendLogEntries(server, args, reply)
-	}
+	rf.cond.L.Lock()
+	rf.cond.Broadcast()
+	rf.cond.L.Unlock()
 	index = len(rf.persister.logs) - 1
 	term = rf.persister.currentTerm
 	return index, term, isLeader
@@ -603,6 +614,12 @@ electAgain:
 
 func (rf *Raft) leaderRoutine() {
 	go rf.notifyFollowers()
+	for i := 0; i < len(rf.peers); i++ {
+		if i == rf.me {
+			continue
+		}
+		go rf.sendToPeer(i)
+	}
 	for {
 		select {
 		case <-rf.higherTermCh:
@@ -675,6 +692,7 @@ func Make(peers []*labrpc.ClientEnd, me int,
 		rf.nextIndex[i] = len(rf.persister.logs)
 		rf.matchIndex[i] = 0
 	}
+	rf.cond = sync.NewCond(&sync.Mutex{})
 	// initialize from state persisted before a crash
 	rf.readPersist(persister.ReadRaftState())
 	go rf.mainRoutine()
