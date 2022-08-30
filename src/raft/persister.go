@@ -21,9 +21,6 @@ type Persister struct {
 	mu          sync.Mutex
 	raftstate   []byte
 	snapshot    []byte
-	currentTerm int
-	votedFor    int
-	logs        []LogEntry
 }
 
 func MakePersister() *Persister {
