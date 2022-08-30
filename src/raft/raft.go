@@ -561,7 +561,7 @@ func (rf *Raft) Start(command interface{}) (int, int, bool) {
 	}
 	rf.Logs = append(rf.Logs, entry)
 	rf.persist()
-	rf.matchIndex[rf.me]++
+	rf.matchIndex[rf.me] = len(rf.Logs) - 1
 	rf.cond.L.Lock()
 	rf.cond.Broadcast()
 	rf.cond.L.Unlock()
@@ -737,7 +737,7 @@ func Make(peers []*labrpc.ClientEnd, me int,
 	s := rand.NewSource(time.Now().UnixNano())
 	rf.rand = rand.New(s)
 	rf.state = Follower
-	rf.voteCount = 0
+	rf.voteCount = 1
 	rf.timer = time.NewTimer(5 * time.Second)
 	rf.stopTimer()
 	rf.higherTermCh = make(chan struct{}, 1)
