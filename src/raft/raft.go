@@ -410,22 +410,22 @@ func (rf *Raft) sendAppendEntries(server int, args *AppendEntriesArgs, reply *Ap
 }
 
 func (rf *Raft) sendLogEntries(server int, args *AppendEntriesArgs, reply *AppendEntriesReply) bool {
-	nextIndex := args.PrevLogIndex + 1
 	ok := rf.sendAppendEntries(server, args, reply)
 	if !ok {
 		return false
 	}
 	for !reply.Success {
-		nextIndex--
-		args.PrevLogIndex = nextIndex - 1
+		rf.nextIndex[server]--
+		args.PrevLogIndex = rf.nextIndex[server] - 1
 		args.PrevLogTerm = rf.getLogTerm(args.PrevLogIndex)
-		args.Entries = rf.Logs[nextIndex:]
+		args.Entries = rf.Logs[rf.nextIndex[server]:]
 		ok = rf.sendAppendEntries(server, args, reply)
 		// leader become follower
 		if !ok {
 			return false
 		}
 	}
+	rf.matchIndex[server] = args.PrevLogIndex
 	rf.matchIndex[server] += len(args.Entries)
 	// rf.dprintf("matchIndex[%d] = %d", server, rf.matchIndex[server])
 	if rf.majorityMatched(rf.matchIndex[server]) {
@@ -445,6 +445,9 @@ func (rf *Raft) sendToPeer(server int) {
 		rf.cond.L.Lock()
 		for rf.matchIndex[server] >= len(rf.Logs)-1 {
 			rf.cond.Wait()
+		}
+		for i := 0; i < len(rf.peers); i++ {
+			rf.nextIndex[i] = len(rf.Logs)
 		}
 		rf.cond.L.Unlock()
 		prevLogIndex := rf.matchIndex[server]
@@ -685,11 +688,12 @@ func (rf *Raft) leaderRoutine() {
 	for {
 		select {
 		case <-rf.killCh:
-			break
+			return
 		case <-rf.higherTermCh:
-			break
 		}
+		break
 	}
+	rf.stopTimer()
 }
 
 func (rf *Raft) notifyFollowers() {
