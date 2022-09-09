@@ -30,11 +30,18 @@ import (
 )
 
 const (
-	Follower           = 0
-	Candidate          = 1
-	Leader             = 2
+	// state
+	Follower  = 0
+	Candidate = 1
+	Leader    = 2
+	// election settings
 	MinElectionTimeout = 500
 	MaxElectionTimeout = 1000
+	// RPC return status
+	RpcSucceed          = 0
+	RpcFailed           = 1
+	RpcHighTerm         = 2
+	RpcAssumptionFailed = 3
 )
 
 func min(a int, b int) int {
@@ -361,7 +368,7 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 		}
 		if args.PrevLogIndex+1+diff_index < len(rf.Logs) {
 			rf.Logs = rf.Logs[:args.PrevLogIndex+1+diff_index]
-			rf.dprintf("discard all records after %d", args.PrevLogIndex + diff_index)
+			rf.dprintf("discard all records after %d", args.PrevLogIndex+diff_index)
 		}
 		rf.Logs = append(rf.Logs, args.Entries[diff_index:]...)
 		for _, e := range args.Entries {
@@ -381,16 +388,16 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 	}
 }
 
-func (rf *Raft) sendRequestVote(server int, args *RequestVoteArgs, reply *RequestVoteReply) bool {
+func (rf *Raft) sendRequestVote(server int, args *RequestVoteArgs, reply *RequestVoteReply) int {
 	// state might change when goroutine is really executed
 	rf.mu.Lock()
 	if rf.state != Candidate || rf.CurrentTerm != args.Term || rf.killed() {
-		return false
+		return RpcAssumptionFailed
 	}
 	rf.mu.Unlock()
 	ok := rf.peers[server].Call("Raft.RequestVote", args, reply)
 	if !ok {
-		return false
+		return RpcFailed
 	}
 	rf.mu.Lock()
 	defer rf.mu.Unlock()
@@ -399,7 +406,7 @@ func (rf *Raft) sendRequestVote(server int, args *RequestVoteArgs, reply *Reques
 	// - term hasn't changed in RequestVote RPC call
 	// - not killed
 	if rf.state != Candidate || rf.CurrentTerm != args.Term || rf.killed() {
-		return false
+		return RpcAssumptionFailed
 	}
 	if reply.Term > rf.CurrentTerm {
 		rf.CurrentTerm = reply.Term
@@ -410,7 +417,7 @@ func (rf *Raft) sendRequestVote(server int, args *RequestVoteArgs, reply *Reques
 			rf.state = Follower
 			rf.higherTermCh <- struct{}{}
 		}
-		return false
+		return RpcHighTerm
 	}
 	if reply.VotedGranted {
 		rf.voteCount++
@@ -420,28 +427,28 @@ func (rf *Raft) sendRequestVote(server int, args *RequestVoteArgs, reply *Reques
 			rf.majorityVotesCh <- struct{}{}
 		}
 	}
-	return true
+	return RpcSucceed
 }
 
 // return false when:
 // - RPC failed
 // - assumption failed
 // - higher term
-func (rf *Raft) sendAppendEntries(server int, args *AppendEntriesArgs, reply *AppendEntriesReply) bool {
+func (rf *Raft) sendAppendEntries(server int, args *AppendEntriesArgs, reply *AppendEntriesReply) int {
 	rf.mu.Lock()
 	if rf.state != Leader || rf.CurrentTerm != args.Term || rf.killed() {
-		return false
+		return RpcAssumptionFailed
 	}
 	rf.mu.Unlock()
 	ok := rf.peers[server].Call("Raft.AppendEntries", args, reply)
 	if !ok {
-		return false
+		return RpcFailed
 	}
 	rf.mu.Lock()
 	defer rf.mu.Unlock()
 	// recheck assumptions
 	if rf.state != Leader || rf.CurrentTerm != args.Term || rf.killed() {
-		return false
+		return RpcAssumptionFailed
 	}
 	if reply.Term > rf.CurrentTerm {
 		rf.CurrentTerm = reply.Term
@@ -452,9 +459,9 @@ func (rf *Raft) sendAppendEntries(server int, args *AppendEntriesArgs, reply *Ap
 			rf.state = Follower
 			rf.higherTermCh <- struct{}{}
 		}
-		return false
+		return RpcHighTerm
 	}
-	return true
+	return RpcSucceed
 }
 
 func (rf *Raft) sendLogEntries(server int) bool {
@@ -471,8 +478,8 @@ func (rf *Raft) sendLogEntries(server int) bool {
 		Entries:      rf.Logs[rf.nextIndex[server]:],
 	}
 	reply := &AppendEntriesReply{}
-	ok := rf.sendAppendEntries(server, args, reply)
-	if !ok {
+	ret := rf.sendAppendEntries(server, args, reply)
+	if ret != RpcSucceed {
 		return false
 	}
 	for !reply.Success {
@@ -486,9 +493,8 @@ func (rf *Raft) sendLogEntries(server int) bool {
 		args.PrevLogIndex = rf.nextIndex[server] - 1
 		args.PrevLogTerm = rf.getLogTerm(args.PrevLogIndex)
 		args.Entries = rf.Logs[rf.nextIndex[server]:]
-		ok = rf.sendAppendEntries(server, args, reply)
-		// leader become follower
-		if !ok {
+		ret := rf.sendAppendEntries(server, args, reply)
+		if ret != RpcSucceed {
 			return false
 		}
 	}
@@ -500,7 +506,7 @@ func (rf *Raft) sendLogEntries(server int) bool {
 		rf.setCommitIndex(match)
 		rf.dprintf("commitIndex(majority) = %d", rf.commitIndex)
 	}
-	return ok
+	return true
 }
 
 func (rf *Raft) replicateLog(server int) {
