@@ -817,6 +817,7 @@ func TestFigure8Unreliable2C(t *testing.T) {
 		}
 	}
 
+	DPrintf("connect all servers")
 	for i := 0; i < servers; i++ {
 		if cfg.connected[i] == false {
 			cfg.connect(i)
