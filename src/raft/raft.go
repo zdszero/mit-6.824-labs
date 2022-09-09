@@ -392,6 +392,7 @@ func (rf *Raft) sendRequestVote(server int, args *RequestVoteArgs, reply *Reques
 	// state might change when goroutine is really executed
 	rf.mu.Lock()
 	if rf.state != Candidate || rf.CurrentTerm != args.Term || rf.killed() {
+		rf.mu.Unlock()
 		return RpcAssumptionFailed
 	}
 	rf.mu.Unlock()
@@ -437,6 +438,7 @@ func (rf *Raft) sendRequestVote(server int, args *RequestVoteArgs, reply *Reques
 func (rf *Raft) sendAppendEntries(server int, args *AppendEntriesArgs, reply *AppendEntriesReply) int {
 	rf.mu.Lock()
 	if rf.state != Leader || rf.CurrentTerm != args.Term || rf.killed() {
+		rf.mu.Unlock()
 		return RpcAssumptionFailed
 	}
 	rf.mu.Unlock()
@@ -468,7 +470,6 @@ func (rf *Raft) sendLogEntries(server int) bool {
 	rf.nextIndex[server] = len(rf.Logs) - 1
 	prevLogIndex := rf.nextIndex[server] - 1
 	prevLogTerm := rf.getLogTerm(prevLogIndex)
-	rf.cond.L.Unlock()
 	args := &AppendEntriesArgs{
 		IsHeartbeat:  false,
 		Term:         rf.CurrentTerm,
@@ -514,13 +515,17 @@ func (rf *Raft) replicateLog(server int) {
 		if rf.killed() {
 			break
 		}
+		rf.mu.Lock()
 		if rf.state != Leader {
+			rf.mu.Unlock()
 			break
 		}
+		rf.mu.Unlock()
 		rf.cond.L.Lock()
 		for rf.matchIndex[server] >= len(rf.Logs)-1 {
 			rf.cond.Wait()
 		}
+		rf.cond.L.Unlock()
 		rf.sendLogEntries(server)
 	}
 }
