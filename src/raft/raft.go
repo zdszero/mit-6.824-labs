@@ -382,13 +382,23 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 }
 
 func (rf *Raft) sendRequestVote(server int, args *RequestVoteArgs, reply *RequestVoteReply) bool {
-	if rf.state != Candidate {
+	// state might change when goroutine is really executed
+	rf.mu.Lock()
+	if rf.state != Candidate || rf.CurrentTerm != args.Term || rf.killed() {
 		return false
 	}
+	rf.mu.Unlock()
 	ok := rf.peers[server].Call("Raft.RequestVote", args, reply)
+	if !ok {
+		return false
+	}
 	rf.mu.Lock()
 	defer rf.mu.Unlock()
-	if rf.state != Candidate {
+	// recheck all assumptions
+	// - still a candidate
+	// - term hasn't changed in RequestVote RPC call
+	// - not killed
+	if rf.state != Candidate || rf.CurrentTerm != args.Term || rf.killed() {
 		return false
 	}
 	if reply.Term > rf.CurrentTerm {
@@ -400,7 +410,7 @@ func (rf *Raft) sendRequestVote(server int, args *RequestVoteArgs, reply *Reques
 			rf.state = Follower
 			rf.higherTermCh <- struct{}{}
 		}
-		return ok
+		return false
 	}
 	if reply.VotedGranted {
 		rf.voteCount++
@@ -410,18 +420,27 @@ func (rf *Raft) sendRequestVote(server int, args *RequestVoteArgs, reply *Reques
 			rf.majorityVotesCh <- struct{}{}
 		}
 	}
-	return ok
+	return true
 }
 
+// return false when:
+// - RPC failed
+// - assumption failed
+// - higher term
 func (rf *Raft) sendAppendEntries(server int, args *AppendEntriesArgs, reply *AppendEntriesReply) bool {
-	if rf.state != Leader {
+	rf.mu.Lock()
+	if rf.state != Leader || rf.CurrentTerm != args.Term || rf.killed() {
 		return false
 	}
+	rf.mu.Unlock()
 	ok := rf.peers[server].Call("Raft.AppendEntries", args, reply)
-	// rf.dprintf("->[%d](%v) %v: prevTerm %d, prevIndex %d", server, args.Entry.Command, reply.Success, args.PrevLogTerm, args.PrevLogIndex)
+	if !ok {
+		return false
+	}
 	rf.mu.Lock()
 	defer rf.mu.Unlock()
-	if rf.state != Leader {
+	// recheck assumptions
+	if rf.state != Leader || rf.CurrentTerm != args.Term || rf.killed() {
 		return false
 	}
 	if reply.Term > rf.CurrentTerm {
@@ -435,7 +454,7 @@ func (rf *Raft) sendAppendEntries(server int, args *AppendEntriesArgs, reply *Ap
 		}
 		return false
 	}
-	return ok
+	return true
 }
 
 func (rf *Raft) sendLogEntries(server int) bool {
