@@ -52,7 +52,7 @@ func min(a int, b int) int {
 }
 
 // import "bytes"
-// import "../labgob"
+// import "mit-6.824/labgob"
 
 //
 // as each Raft peer becomes aware that successive log entries are
