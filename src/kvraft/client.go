@@ -11,7 +11,9 @@ import (
 type Clerk struct {
 	servers []*labrpc.ClientEnd
 	// You will have to modify this struct.
-	leader int
+	recentLeader int
+	requestId    int
+	clientId     int64
 }
 
 func nrand() int64 {
@@ -24,8 +26,10 @@ func nrand() int64 {
 func MakeClerk(servers []*labrpc.ClientEnd) *Clerk {
 	ck := new(Clerk)
 	ck.servers = servers
-	ck.leader = -1
 	// You'll have to add code here.
+	ck.recentLeader = 0
+	ck.requestId = 0
+	ck.clientId = nrand()
 	return ck
 }
 
@@ -45,21 +49,21 @@ func (ck *Clerk) Get(key string) string {
 
 	// You will have to modify this function.
 	args := GetArgs{
-		Key: key,
+		Key:       key,
+		ClientId:  ck.clientId,
+		RequestId: ck.requestId,
 	}
 	reply := GetReply{}
+	ck.requestId++
 	var ret string
 findLeader:
-	if ck.leader == -1 {
+	if ck.recentLeader == -1 {
 		for i, s := range ck.servers {
 			ok := s.Call("KVServer.Get", &args, &reply)
-			if !ok {
+			if !ok || reply.Err == ErrWrongLeader {
 				continue
 			}
-			if reply.Err == ErrWrongLeader {
-				continue
-			}
-			ck.leader = i
+			ck.recentLeader = i
 			if reply.Err == ErrNoKey {
 				ret = ""
 			} else {
@@ -67,11 +71,15 @@ findLeader:
 			}
 			break
 		}
+		if ck.recentLeader == -1 {
+			time.Sleep(time.Millisecond * 50)
+			goto findLeader
+		}
 	} else {
-		s := ck.servers[ck.leader]
+		s := ck.servers[ck.recentLeader]
 		ok := s.Call("KVServer.Get", &args, &reply)
 		if !ok || reply.Err == ErrWrongLeader {
-			ck.leader = -1
+			ck.recentLeader = -1
 			goto findLeader
 		}
 		if reply.Err == ErrNoKey {
@@ -96,36 +104,35 @@ findLeader:
 func (ck *Clerk) PutAppend(key string, value string, op string) {
 	// You will have to modify this function.
 	args := PutAppendArgs{
-		Key:   key,
-		Value: value,
-		Op:    op,
+		Key:       key,
+		Value:     value,
+		Op:        op,
+		ClientId:  ck.clientId,
+		RequestId: ck.requestId,
 	}
 	reply := PutAppendReply{}
 findLeader:
-	if ck.leader == -1 {
-		for {
-			for i, s := range ck.servers {
-				ok := s.Call("KVServer.PutAppend", &args, &reply)
-				if !ok {
-					continue
-				}
-				if reply.Err == ErrWrongLeader {
-					continue
-				}
-				ck.leader = i
-				break
+	if ck.recentLeader == -1 {
+		for i, s := range ck.servers {
+			ok := s.Call("KVServer.PutAppend", &args, &reply)
+			if !ok {
+				continue
 			}
-			if ck.leader == -1 {
-				time.Sleep(time.Millisecond * 50)
-			} else {
-				break
+			if reply.Err == ErrWrongLeader {
+				continue
 			}
+			ck.recentLeader = i
+			break
+		}
+		if ck.recentLeader == -1 {
+			time.Sleep(time.Millisecond * 50)
+			goto findLeader
 		}
 	} else {
-		s := ck.servers[ck.leader]
+		s := ck.servers[ck.recentLeader]
 		ok := s.Call("KVServer.PutAppend", &args, &reply)
 		if !ok || reply.Err == ErrWrongLeader {
-			ck.leader = -1
+			ck.recentLeader = -1
 			goto findLeader
 		}
 	}

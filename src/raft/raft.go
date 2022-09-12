@@ -559,6 +559,7 @@ func (rf *Raft) setCommitIndex(commitIndex int) {
 func (rf *Raft) applyCommands() {
 	for {
 		if rf.killed() {
+			close(rf.applyCh)
 			break
 		}
 		if rf.lastApplied < rf.commitIndex {

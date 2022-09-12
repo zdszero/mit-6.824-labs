@@ -1,9 +1,7 @@
 package kvraft
 
 import (
-	"fmt"
 	"log"
-	"strings"
 	"sync"
 	"sync/atomic"
 
@@ -25,6 +23,11 @@ type Op struct {
 	// Your definitions here.
 	// Field names must start with capital letters,
 	// otherwise RPC will break.
+	Operation string
+	Key       string
+	Value     string
+	ClientId  int64
+	RequestId int
 }
 
 type KVServer struct {
@@ -45,8 +48,13 @@ func (kv *KVServer) Get(args *GetArgs, reply *GetReply) {
 	// Your code here.
 	kv.mu.Lock()
 	defer kv.mu.Unlock()
-	cmd := "Get:" + args.Key
-	_, _, isLeader := kv.rf.Start(cmd)
+	op := Op{
+		Operation: "Get",
+		Key:       args.Key,
+		ClientId:  args.ClientId,
+		RequestId: args.RequestId,
+	}
+	_, _, isLeader := kv.rf.Start(op)
 	if !isLeader {
 		reply.Err = ErrWrongLeader
 		return
@@ -64,9 +72,14 @@ func (kv *KVServer) PutAppend(args *PutAppendArgs, reply *PutAppendReply) {
 	// Your code here.
 	kv.mu.Lock()
 	defer kv.mu.Unlock()
-	var cmd string
-	cmd = fmt.Sprintf("%v:%v,%v", args.Op, args.Key, args.Value)
-	_, _, isLeader := kv.rf.Start(cmd)
+	op := Op{
+		Operation: args.Op,
+		Key:       args.Key,
+		Value:     args.Value,
+		ClientId:  args.ClientId,
+		RequestId: args.RequestId,
+	}
+	_, _, isLeader := kv.rf.Start(op)
 	if !isLeader {
 		reply.Err = ErrWrongLeader
 		return
@@ -80,27 +93,16 @@ func (kv *KVServer) applier() {
 		if !m.CommandValid {
 			continue
 		}
-		cmd := fmt.Sprint(m.Command)
-		if strings.HasPrefix(cmd, "Get") {
+		op := m.Command.(Op)
+		if op.Operation == "Get" {
 			// do nothing
-			DPrintf("GET %v", cmd[4:])
+		} else if op.Operation == "Put" {
+			kv.storage[op.Key] = op.Value
 		} else {
-			index1 := strings.Index(cmd, ":")
-			index2 := strings.Index(cmd, ",")
-			key := cmd[index1+1 : index2]
-			value := cmd[index2+1:]
-			if strings.HasPrefix(cmd, "Put") {
-				// "Put:Key,Value"
-				DPrintf("PUT %v:%v", key, value)
-				kv.storage[key] = value
+			if origin, ok := kv.storage[op.Key]; ok {
+				kv.storage[op.Key] = origin + op.Value
 			} else {
-				// "Append:Key,Value"
-				DPrintf("APP %v:%v", key, value)
-				if origin, ok := kv.storage[key]; ok {
-					kv.storage[key] = origin + value
-				} else {
-					kv.storage[key] = value
-				}
+				kv.storage[op.Key] = op.Value
 			}
 		}
 		// notify the RPC to return OK
