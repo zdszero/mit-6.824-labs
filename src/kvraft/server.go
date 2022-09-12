@@ -1,15 +1,18 @@
 package kvraft
 
 import (
-	"mit-6.824/labgob"
-	"mit-6.824/labrpc"
+	"fmt"
 	"log"
-	"mit-6.824/raft"
+	"strings"
 	"sync"
 	"sync/atomic"
+
+	"mit-6.824/labgob"
+	"mit-6.824/labrpc"
+	"mit-6.824/raft"
 )
 
-const Debug = 0
+const Debug = 1
 
 func DPrintf(format string, a ...interface{}) (n int, err error) {
 	if Debug > 0 {
@@ -17,7 +20,6 @@ func DPrintf(format string, a ...interface{}) (n int, err error) {
 	}
 	return
 }
-
 
 type Op struct {
 	// Your definitions here.
@@ -35,15 +37,75 @@ type KVServer struct {
 	maxraftstate int // snapshot if log grows this big
 
 	// Your definitions here.
+	done    chan bool
+	storage map[string]string
 }
-
 
 func (kv *KVServer) Get(args *GetArgs, reply *GetReply) {
 	// Your code here.
+	kv.mu.Lock()
+	defer kv.mu.Unlock()
+	cmd := "Get:" + args.Key
+	_, _, isLeader := kv.rf.Start(cmd)
+	if !isLeader {
+		reply.Err = ErrWrongLeader
+		return
+	}
+	<-kv.done
+	if val, ok := kv.storage[args.Key]; ok {
+		reply.Err = OK
+		reply.Value = val
+	} else {
+		reply.Err = ErrNoKey
+	}
 }
 
 func (kv *KVServer) PutAppend(args *PutAppendArgs, reply *PutAppendReply) {
 	// Your code here.
+	kv.mu.Lock()
+	defer kv.mu.Unlock()
+	var cmd string
+	cmd = fmt.Sprintf("%v:%v,%v", args.Op, args.Key, args.Value)
+	_, _, isLeader := kv.rf.Start(cmd)
+	if !isLeader {
+		reply.Err = ErrWrongLeader
+		return
+	}
+	<-kv.done
+	reply.Err = OK
+}
+
+func (kv *KVServer) applier() {
+	for m := range kv.applyCh {
+		if !m.CommandValid {
+			continue
+		}
+		cmd := fmt.Sprint(m.Command)
+		if strings.HasPrefix(cmd, "Get") {
+			// do nothing
+			DPrintf("GET %v", cmd[4:])
+		} else {
+			index1 := strings.Index(cmd, ":")
+			index2 := strings.Index(cmd, ",")
+			key := cmd[index1+1 : index2]
+			value := cmd[index2+1:]
+			if strings.HasPrefix(cmd, "Put") {
+				// "Put:Key,Value"
+				DPrintf("PUT %v:%v", key, value)
+				kv.storage[key] = value
+			} else {
+				// "Append:Key,Value"
+				DPrintf("APP %v:%v", key, value)
+				if origin, ok := kv.storage[key]; ok {
+					kv.storage[key] = origin + value
+				} else {
+					kv.storage[key] = value
+				}
+			}
+		}
+		// notify the RPC to return OK
+		kv.done <- true
+	}
 }
 
 //
@@ -96,6 +158,10 @@ func StartKVServer(servers []*labrpc.ClientEnd, me int, persister *raft.Persiste
 	kv.rf = raft.Make(servers, me, persister, kv.applyCh)
 
 	// You may need initialization code here.
+	kv.done = make(chan bool)
+	kv.storage = make(map[string]string)
+
+	go kv.applier()
 
 	return kv
 }

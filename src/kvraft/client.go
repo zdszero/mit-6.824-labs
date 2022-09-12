@@ -1,13 +1,17 @@
 package kvraft
 
-import "mit-6.824/labrpc"
-import "crypto/rand"
-import "math/big"
+import (
+	"crypto/rand"
+	"math/big"
+	"time"
 
+	"mit-6.824/labrpc"
+)
 
 type Clerk struct {
 	servers []*labrpc.ClientEnd
 	// You will have to modify this struct.
+	leader int
 }
 
 func nrand() int64 {
@@ -20,6 +24,7 @@ func nrand() int64 {
 func MakeClerk(servers []*labrpc.ClientEnd) *Clerk {
 	ck := new(Clerk)
 	ck.servers = servers
+	ck.leader = -1
 	// You'll have to add code here.
 	return ck
 }
@@ -39,7 +44,43 @@ func MakeClerk(servers []*labrpc.ClientEnd) *Clerk {
 func (ck *Clerk) Get(key string) string {
 
 	// You will have to modify this function.
-	return ""
+	args := GetArgs{
+		Key: key,
+	}
+	reply := GetReply{}
+	var ret string
+findLeader:
+	if ck.leader == -1 {
+		for i, s := range ck.servers {
+			ok := s.Call("KVServer.Get", &args, &reply)
+			if !ok {
+				continue
+			}
+			if reply.Err == ErrWrongLeader {
+				continue
+			}
+			ck.leader = i
+			if reply.Err == ErrNoKey {
+				ret = ""
+			} else {
+				ret = reply.Value
+			}
+			break
+		}
+	} else {
+		s := ck.servers[ck.leader]
+		ok := s.Call("KVServer.Get", &args, &reply)
+		if !ok || reply.Err == ErrWrongLeader {
+			ck.leader = -1
+			goto findLeader
+		}
+		if reply.Err == ErrNoKey {
+			ret = ""
+		} else {
+			ret = reply.Value
+		}
+	}
+	return ret
 }
 
 //
@@ -54,6 +95,40 @@ func (ck *Clerk) Get(key string) string {
 //
 func (ck *Clerk) PutAppend(key string, value string, op string) {
 	// You will have to modify this function.
+	args := PutAppendArgs{
+		Key:   key,
+		Value: value,
+		Op:    op,
+	}
+	reply := PutAppendReply{}
+findLeader:
+	if ck.leader == -1 {
+		for {
+			for i, s := range ck.servers {
+				ok := s.Call("KVServer.PutAppend", &args, &reply)
+				if !ok {
+					continue
+				}
+				if reply.Err == ErrWrongLeader {
+					continue
+				}
+				ck.leader = i
+				break
+			}
+			if ck.leader == -1 {
+				time.Sleep(time.Millisecond * 50)
+			} else {
+				break
+			}
+		}
+	} else {
+		s := ck.servers[ck.leader]
+		ok := s.Call("KVServer.PutAppend", &args, &reply)
+		if !ok || reply.Err == ErrWrongLeader {
+			ck.leader = -1
+			goto findLeader
+		}
+	}
 }
 
 func (ck *Clerk) Put(key string, value string) {
