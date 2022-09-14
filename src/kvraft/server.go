@@ -4,6 +4,7 @@ import (
 	"log"
 	"sync"
 	"sync/atomic"
+	"time"
 
 	"mit-6.824/labgob"
 	"mit-6.824/labrpc"
@@ -11,6 +12,7 @@ import (
 )
 
 const Debug = 1
+const ConsensusTimeout = 500
 
 func DPrintf(format string, a ...interface{}) (n int, err error) {
 	if Debug > 0 {
@@ -40,12 +42,26 @@ type KVServer struct {
 	maxraftstate int // snapshot if log grows this big
 
 	// Your definitions here.
-	done    chan bool
-	storage map[string]string
+	db            map[string]string
+	waitApplyCh   map[int]chan Op
+	lastRequestId map[int64]int
+}
+
+func (kv *KVServer) duplicateRequest(clientId int64, requestId int) bool {
+	lastId, ok := kv.lastRequestId[clientId]
+	if !ok {
+		kv.lastRequestId[clientId] = -1
+		return false
+	}
+	return requestId <= lastId
 }
 
 func (kv *KVServer) Get(args *GetArgs, reply *GetReply) {
 	// Your code here.
+	if kv.killed() {
+		reply.Err = ErrWrongLeader
+		return
+	}
 	kv.mu.Lock()
 	defer kv.mu.Unlock()
 	op := Op{
@@ -54,22 +70,43 @@ func (kv *KVServer) Get(args *GetArgs, reply *GetReply) {
 		ClientId:  args.ClientId,
 		RequestId: args.RequestId,
 	}
-	_, _, isLeader := kv.rf.Start(op)
+	index, _, isLeader := kv.rf.Start(op)
 	if !isLeader {
 		reply.Err = ErrWrongLeader
 		return
 	}
-	<-kv.done
-	if val, ok := kv.storage[args.Key]; ok {
-		reply.Err = OK
-		reply.Value = val
-	} else {
-		reply.Err = ErrNoKey
+	kv.dprintf("start (%v-%v) on index %d", args.ClientId, args.RequestId, index)
+	raftIndexCh, ok := kv.waitApplyCh[index]
+	if !ok {
+		kv.waitApplyCh[index] = make(chan Op, 1)
+		raftIndexCh = kv.waitApplyCh[index]
 	}
+	select {
+	case commitOp := <-raftIndexCh:
+		if commitOp.ClientId == op.ClientId && commitOp.RequestId == op.RequestId {
+			kv.dprintf("index %d has been applied", index)
+			if val, ok := kv.db[args.Key]; ok {
+				reply.Err = OK
+				reply.Value = val
+			} else {
+				reply.Err = ErrNoKey
+			}
+		} else {
+			reply.Err = ErrWrongLeader
+		}
+	case <-time.After(time.Millisecond * ConsensusTimeout):
+		kv.dprintf("index %d times out", index)
+		reply.Err = ErrWrongLeader
+	}
+	delete(kv.waitApplyCh, index)
 }
 
 func (kv *KVServer) PutAppend(args *PutAppendArgs, reply *PutAppendReply) {
 	// Your code here.
+	if kv.killed() {
+		reply.Err = ErrWrongLeader
+		return
+	}
 	kv.mu.Lock()
 	defer kv.mu.Unlock()
 	op := Op{
@@ -79,13 +116,40 @@ func (kv *KVServer) PutAppend(args *PutAppendArgs, reply *PutAppendReply) {
 		ClientId:  args.ClientId,
 		RequestId: args.RequestId,
 	}
-	_, _, isLeader := kv.rf.Start(op)
+	index, _, isLeader := kv.rf.Start(op)
 	if !isLeader {
 		reply.Err = ErrWrongLeader
 		return
 	}
-	<-kv.done
-	reply.Err = OK
+	raftIndexCh, ok := kv.waitApplyCh[index]
+	if !ok {
+		kv.waitApplyCh[index] = make(chan Op, 1)
+		raftIndexCh = kv.waitApplyCh[index]
+	}
+	kv.dprintf("start (%v-%v) on index %d", args.ClientId, args.RequestId, index)
+	select {
+	case commitOp := <-raftIndexCh:
+		if commitOp.ClientId == op.ClientId && commitOp.RequestId == op.RequestId {
+			kv.dprintf("index %d has been applied", index)
+			reply.Err = OK
+		} else {
+			reply.Err = ErrWrongLeader
+		}
+	case <-time.After(time.Millisecond * ConsensusTimeout):
+		kv.dprintf("index %d times out", index)
+		reply.Err = ErrWrongLeader
+	}
+	delete(kv.waitApplyCh, index)
+}
+
+func (kv *KVServer) dprintf(format string, a ...interface{}) {
+	args := []interface{}{}
+	args = append(args, kv.rf.GetId())
+	args = append(args, a...)
+	_, isLeader := kv.rf.GetState()
+	if isLeader {
+		DPrintf("server(%d) "+format, args...)
+	}
 }
 
 func (kv *KVServer) applier() {
@@ -94,19 +158,33 @@ func (kv *KVServer) applier() {
 			continue
 		}
 		op := m.Command.(Op)
-		if op.Operation == "Get" {
-			// do nothing
-		} else if op.Operation == "Put" {
-			kv.storage[op.Key] = op.Value
-		} else {
-			if origin, ok := kv.storage[op.Key]; ok {
-				kv.storage[op.Key] = origin + op.Value
+		if !kv.duplicateRequest(op.ClientId, op.RequestId) {
+			if op.RequestId != kv.lastRequestId[op.ClientId]+1 {
+				log.Fatalf("server(%d) execute client(%v) requests not in serial order,\nexpected: %v, actual %v", kv.rf.GetId(), op.ClientId, kv.lastRequestId[op.ClientId]+1, op.RequestId)
+			}
+			kv.lastRequestId[op.ClientId] = op.RequestId
+			kv.dprintf("kv.lastRequestId[%v] = %v", op.ClientId, op.RequestId)
+			if op.Operation == "Get" {
+				kv.dprintf("GET(%v-%v): %v", op.ClientId, op.RequestId, op.Key)
+				// do nothing
+			} else if op.Operation == "Put" {
+				kv.dprintf("PUT(%v-%v): %v=%v", op.ClientId, op.RequestId, op.Key, op.Value)
+				kv.db[op.Key] = op.Value
 			} else {
-				kv.storage[op.Key] = op.Value
+				kv.dprintf("APP(%v-%v): APP: %v=%v", op.ClientId, op.RequestId, op.Key, op.Value)
+				if origin, ok := kv.db[op.Key]; ok {
+					kv.db[op.Key] = origin + op.Value
+				} else {
+					kv.db[op.Key] = op.Value
+				}
+				kv.dprintf("VAL: %v=%v", op.Key, kv.db[op.Key])
 			}
 		}
 		// notify the RPC to return OK
-		kv.done <- true
+		if ch, ok := kv.waitApplyCh[m.CommandIndex]; ok {
+			kv.dprintf("(%v-%v) index %d done", op.ClientId, op.RequestId, m.CommandIndex)
+			ch <- op
+		}
 	}
 }
 
@@ -160,8 +238,9 @@ func StartKVServer(servers []*labrpc.ClientEnd, me int, persister *raft.Persiste
 	kv.rf = raft.Make(servers, me, persister, kv.applyCh)
 
 	// You may need initialization code here.
-	kv.done = make(chan bool)
-	kv.storage = make(map[string]string)
+	kv.db = make(map[string]string)
+	kv.waitApplyCh = make(map[int]chan Op)
+	kv.lastRequestId = make(map[int64]int)
 
 	go kv.applier()
 

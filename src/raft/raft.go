@@ -105,6 +105,8 @@ type Raft struct {
 	cond        *sync.Cond
 }
 
+func (rf *Raft) GetId() int { return rf.me }
+
 func (rf *Raft) resetTimer() {
 	duration := time.Duration(MinElectionTimeout + rf.rand.Intn(MaxElectionTimeout-MinElectionTimeout+1))
 	rf.timer.Reset(duration * time.Millisecond)
