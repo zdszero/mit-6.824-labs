@@ -1,6 +1,7 @@
 package kvraft
 
 import (
+	"bytes"
 	"log"
 	"sync"
 	"sync/atomic"
@@ -11,8 +12,12 @@ import (
 	"mit-6.824/raft"
 )
 
-const Debug = 1
-const ConsensusTimeout = 500
+const (
+	Debug                  = 1
+	ConsensusTimeout       = 500
+	SnapshotCheckInterval  = 100
+	SnapshotThresholdRatio = 0.9
+)
 
 func DPrintf(format string, a ...interface{}) (n int, err error) {
 	if Debug > 0 {
@@ -47,6 +52,47 @@ type KVServer struct {
 	lastRequestId map[int64]int
 }
 
+func (kv *KVServer) checkSnapshotInstall(index int) {
+	if kv.maxraftstate == -1 {
+		return
+	}
+	ratio := float64(kv.rf.GetRaftStateSize()) / float64(kv.maxraftstate)
+	if ratio > SnapshotThresholdRatio {
+		snapshot := kv.makeSnapshot()
+		kv.rf.Snapshot(index, snapshot)
+	}
+}
+
+func (kv *KVServer) makeSnapshot() []byte {
+	w := new(bytes.Buffer)
+	e := labgob.NewEncoder(w)
+	if err := e.Encode(kv.db); err != nil {
+		log.Fatal("encode error:", err)
+	}
+	if err := e.Encode(kv.lastRequestId); err != nil {
+		log.Fatal("encode error:", err)
+	}
+	return w.Bytes()
+}
+
+func (kv *KVServer) readSnapshot(data []byte) {
+	if data == nil {
+		return
+	}
+	r := bytes.NewBuffer(data)
+	d := labgob.NewDecoder(r)
+	var db map[string]string
+	var lastRequestId map[int64]int
+	if err := d.Decode(&db); err != nil {
+		log.Fatal("decode error:", err)
+	}
+	if err := d.Decode(&lastRequestId); err != nil {
+		log.Fatal("decode error:", err)
+	}
+	kv.db = db
+	kv.lastRequestId = lastRequestId
+}
+
 func (kv *KVServer) duplicateRequest(clientId int64, requestId int) bool {
 	lastId, ok := kv.lastRequestId[clientId]
 	if !ok {
@@ -67,6 +113,7 @@ func (kv *KVServer) Get(args *GetArgs, reply *GetReply) {
 	op := Op{
 		Operation: "Get",
 		Key:       args.Key,
+		Value:     "",
 		ClientId:  args.ClientId,
 		RequestId: args.RequestId,
 	}
@@ -154,36 +201,47 @@ func (kv *KVServer) dprintf(format string, a ...interface{}) {
 
 func (kv *KVServer) applier() {
 	for m := range kv.applyCh {
-		if !m.CommandValid {
-			continue
-		}
-		op := m.Command.(Op)
-		if !kv.duplicateRequest(op.ClientId, op.RequestId) {
-			if op.RequestId != kv.lastRequestId[op.ClientId]+1 {
-				log.Fatalf("server(%d) execute client(%v) requests not in serial order,\nexpected: %v, actual %v", kv.rf.GetId(), op.ClientId, kv.lastRequestId[op.ClientId]+1, op.RequestId)
+		if m.SnapshotValid {
+			b := bytes.NewBuffer(m.SnapshotData)
+			d := labgob.NewDecoder(b)
+			if err := d.Decode(&kv.db); err != nil {
+				log.Fatalln("decode error:", err)
 			}
-			kv.lastRequestId[op.ClientId] = op.RequestId
-			kv.dprintf("kv.lastRequestId[%v] = %v", op.ClientId, op.RequestId)
-			if op.Operation == "Get" {
-				kv.dprintf("GET(%v-%v): %v", op.ClientId, op.RequestId, op.Key)
-				// do nothing
-			} else if op.Operation == "Put" {
-				kv.dprintf("PUT(%v-%v): %v=%v", op.ClientId, op.RequestId, op.Key, op.Value)
-				kv.db[op.Key] = op.Value
-			} else {
-				kv.dprintf("APP(%v-%v): APP: %v=%v", op.ClientId, op.RequestId, op.Key, op.Value)
-				if origin, ok := kv.db[op.Key]; ok {
-					kv.db[op.Key] = origin + op.Value
-				} else {
-					kv.db[op.Key] = op.Value
+			if err := d.Decode(&kv.lastRequestId); err != nil {
+				log.Fatalln("decode error:", err)
+			}
+		}
+		if m.CommandValid {
+			op := m.Command.(Op)
+			if !kv.duplicateRequest(op.ClientId, op.RequestId) {
+				if op.RequestId != kv.lastRequestId[op.ClientId]+1 {
+					log.Fatalf("server(%d) execute client(%v) requests not in serial order,\nexpected: %v, actual %v", kv.rf.GetId(), op.ClientId, kv.lastRequestId[op.ClientId]+1, op.RequestId)
 				}
-				kv.dprintf("VAL: %v=%v", op.Key, kv.db[op.Key])
+				kv.lastRequestId[op.ClientId] = op.RequestId
+				// kv.dprintf("kv.lastRequestId[%v] = %v", op.ClientId, op.RequestId)
+				if op.Operation == "Get" {
+					kv.dprintf("GET(%v-%v): %v", op.ClientId, op.RequestId, op.Key)
+					// do nothing
+				} else if op.Operation == "Put" {
+					kv.dprintf("PUT(%v-%v): %v=%v", op.ClientId, op.RequestId, op.Key, op.Value)
+					kv.db[op.Key] = op.Value
+				} else {
+					kv.dprintf("APP(%v-%v): APP: %v=%v", op.ClientId, op.RequestId, op.Key, op.Value)
+					if origin, ok := kv.db[op.Key]; ok {
+						kv.db[op.Key] = origin + op.Value
+					} else {
+						kv.db[op.Key] = op.Value
+					}
+					kv.dprintf("VAL: %v=%v", op.Key, kv.db[op.Key])
+				}
+				kv.checkSnapshotInstall(m.CommandIndex)
 			}
-		}
-		// notify the RPC to return OK
-		if ch, ok := kv.waitApplyCh[m.CommandIndex]; ok {
-			kv.dprintf("(%v-%v) index %d done", op.ClientId, op.RequestId, m.CommandIndex)
-			ch <- op
+			// notify the RPC to return OK
+			if ch, ok := kv.waitApplyCh[m.CommandIndex]; ok {
+				// kv.dprintf("(%v-%v) index %d done", op.ClientId, op.RequestId, m.CommandIndex)
+				DPrintf("server(%d) (%v-%v) index %d done", kv.rf.GetId(), op.ClientId, op.RequestId, m.CommandIndex)
+				ch <- op
+			}
 		}
 	}
 }
@@ -241,6 +299,8 @@ func StartKVServer(servers []*labrpc.ClientEnd, me int, persister *raft.Persiste
 	kv.db = make(map[string]string)
 	kv.waitApplyCh = make(map[int]chan Op)
 	kv.lastRequestId = make(map[int64]int)
+
+	kv.readSnapshot(persister.ReadSnapshot())
 
 	go kv.applier()
 

@@ -66,9 +66,15 @@ func min(a int, b int) int {
 // ApplyMsg, but set CommandValid to false for these other uses.
 //
 type ApplyMsg struct {
+	// log entry
 	CommandValid bool
 	Command      interface{}
 	CommandIndex int
+	// snapshot
+	SnapshotValid bool
+	SnapshotData  []byte
+	SnapshotIndex int
+	SnapshotTerm  int
 }
 
 //
@@ -159,6 +165,12 @@ func (rf *Raft) getLogTerm(logIndex int) int {
 		log.Panicf("log index %d is out of range [%d, %d]", logIndex, rf.LastIncludedIndex, lastLogIndex)
 	}
 	return rf.Logs[logIndex-firstLogIndex].Term
+}
+
+func (rf *Raft) isInLogs(logIndex int) bool {
+	firstLogIndex := rf.LastIncludedIndex + 1
+	lastLogIndex := rf.LastIncludedIndex + len(rf.Logs)
+	return logIndex >= firstLogIndex && logIndex <= lastLogIndex
 }
 
 func (rf *Raft) getLogCommand(logIndex int) interface{} {
@@ -560,10 +572,12 @@ func (rf *Raft) sendLogEntries(server int) bool {
 			rf.nextIndex[server] = reply.XIndex
 		}
 		if rf.nextIndex[server] <= rf.LastIncludedIndex {
+			rf.dprintf("sending snapshot to %d", server)
 			ret := rf.sendSnapshot(server)
 			if ret != RpcSucceed {
 				return false
 			}
+			rf.matchIndex[server] = rf.LastIncludedIndex
 			rf.nextIndex[server] = rf.LastIncludedIndex + 1
 		}
 		// nextIndex > LastIncludedIndex
@@ -578,7 +592,7 @@ func (rf *Raft) sendLogEntries(server int) bool {
 	rf.matchIndex[server] = args.PrevLogIndex
 	rf.matchIndex[server] += len(args.Entries)
 	match := rf.matchIndex[server]
-	rf.dprintf("matchIndex[%d] = %d", server, rf.matchIndex[server])
+	// rf.dprintf("matchIndex[%d] = %d", server, rf.matchIndex[server])
 	if rf.majorityMatched(match) && rf.getLogTerm(match) == rf.CurrentTerm {
 		rf.setCommitIndex(match)
 		rf.dprintf("commitIndex(majority) = %d", rf.commitIndex)
@@ -629,15 +643,27 @@ func (rf *Raft) setCommitIndex(commitIndex int) {
 	rf.commitIndex = commitIndex
 }
 
+func (rf *Raft) setAppliedIndex(appliedIndex int) {
+	if appliedIndex < rf.lastApplied {
+		return
+	}
+	rf.lastApplied = appliedIndex
+}
+
 func (rf *Raft) applyCommands() {
 	for !rf.killed() {
 		if rf.lastApplied < rf.commitIndex {
 			rf.dprintf(" APPLY %d-%d", rf.lastApplied, rf.commitIndex)
 			for i := rf.lastApplied + 1; i <= rf.commitIndex; i++ {
+				cmd := rf.getLogCommand(i)
+				if cmd == nil {
+					log.Fatalf("index %d cmd is nil", i)
+				}
 				msg := ApplyMsg{
-					CommandValid: true,
-					Command:      rf.getLogCommand(i),
-					CommandIndex: i,
+					CommandValid:  true,
+					Command:       cmd,
+					CommandIndex:  i,
+					SnapshotValid: false,
 				}
 				rf.applyCh <- msg
 			}
@@ -832,11 +858,15 @@ func (rf *Raft) notifyFollowers() {
 func (rf *Raft) Snapshot(index int, snapshot []byte) {
 	rf.mu.Lock()
 	defer rf.mu.Unlock()
+	if index <= rf.LastIncludedTerm {
+		return
+	}
+	tmpTerm := rf.getLogTerm(index)
 	tempLogs := []LogEntry{}
 	tempLogs = append(tempLogs, rf.Logs[index-rf.LastIncludedIndex:]...)
 	rf.Logs = tempLogs
 	rf.LastIncludedIndex = index
-	rf.LastIncludedTerm = rf.getLogTerm(index)
+	rf.LastIncludedTerm = tmpTerm
 	rf.persister.SaveStateAndSnapshot(rf.getStateData(), snapshot)
 }
 
@@ -861,6 +891,7 @@ func (rf *Raft) InstallSnapshot(args *InstallSnapshotArgs, reply *InstallSnapsho
 	} else if args.Term > rf.CurrentTerm {
 		rf.CurrentTerm = args.Term
 		rf.VotedFor = -1
+		rf.persist()
 		if rf.state != Follower {
 			rf.dprintf("recv term %d, convert to follower", args.Term)
 			rf.state = Follower
@@ -871,8 +902,36 @@ func (rf *Raft) InstallSnapshot(args *InstallSnapshotArgs, reply *InstallSnapsho
 	if args.LastIncludedIndex < rf.LastIncludedIndex || args.LastIncludedTerm < rf.LastIncludedTerm {
 		log.Fatalln("Error: install snapshot with smaller last index or term")
 	}
-	rf.Snapshot(args.LastIncludedIndex, args.Data)
+
+	if args.LastIncludedIndex <= rf.LastIncludedIndex {
+		rf.dprintf("receive older snapshot on index %d", args.LastIncludedIndex)
+		return
+	}
+	// args.LastIncludedIndex > rf.LastIncludedIndex
+
+	if args.LastIncludedIndex >= rf.getLastLogIndex() {
+		rf.Logs = []LogEntry{}
+	} else {
+		tempLogs := []LogEntry{}
+		tempLogs = append(tempLogs, rf.Logs[args.LastIncludedIndex-rf.LastIncludedIndex:]...)
+		rf.Logs = tempLogs
+	}
+
+	rf.LastIncludedIndex = args.LastIncludedIndex
+	rf.LastIncludedTerm = args.LastIncludedTerm
+	rf.setCommitIndex(args.LastIncludedIndex)
+	rf.setAppliedIndex(args.LastIncludedIndex)
 	rf.persist()
+
+	restoreMsg := ApplyMsg{
+		CommandValid:  false,
+		SnapshotValid: true,
+		SnapshotData:  args.Data,
+		SnapshotIndex: args.LastIncludedIndex,
+		SnapshotTerm:  args.LastIncludedTerm,
+	}
+	rf.applyCh <- restoreMsg
+	rf.dprintf("install snapshot from leader(%d) on index %d", args.LeaderId, args.LastIncludedIndex)
 }
 
 func (rf *Raft) sendSnapshot(server int) int {
