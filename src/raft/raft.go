@@ -51,6 +51,13 @@ func min(a int, b int) int {
 	return b
 }
 
+func max(a int, b int) int {
+	if a > b {
+		return a
+	}
+	return b
+}
+
 // import "bytes"
 // import "mit-6.824/labgob"
 
@@ -400,7 +407,7 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 	if args.IsHeartbeat {
 		rf.leaderId = args.LeaderId
 		if args.LeaderCommit > rf.commitIndex {
-			rf.setCommitIndex(min(args.LeaderCommit, rf.getLastLogIndex()))
+			rf.commitIndex = max((min(args.LeaderCommit, rf.getLastLogIndex())), rf.commitIndex)
 			rf.dprintf("commitIndex(heartbeat) = %d", rf.commitIndex)
 		}
 		return
@@ -607,7 +614,7 @@ func (rf *Raft) replicateLog(server int) bool {
 	match := rf.matchIndex[server]
 	// rf.dprintf("matchIndex[%d] = %d", server, rf.matchIndex[server])
 	if rf.majorityMatched(match) && rf.getLogTerm(match) == rf.CurrentTerm {
-		rf.setCommitIndex(match)
+		rf.commitIndex = max(rf.commitIndex, match)
 		rf.dprintf("commitIndex(majority) = %d", rf.commitIndex)
 	}
 	return true
@@ -649,29 +656,11 @@ func (rf *Raft) majorityMatched(n int) bool {
 	return false
 }
 
-func (rf *Raft) setCommitIndex(commitIndex int) {
-	if commitIndex <= rf.commitIndex {
-		return
-	}
-	rf.commitIndex = commitIndex
-}
-
-func (rf *Raft) setAppliedIndex(appliedIndex int) {
-	if appliedIndex < rf.lastApplied {
-		return
-	}
-	rf.lastApplied = appliedIndex
-}
-
 func (rf *Raft) applyCommandsLoop() {
 	for !rf.killed() {
-	recheck:
 		if rf.lastApplied < rf.commitIndex {
 			rf.dprintf(" APPLY %d-%d", rf.lastApplied, rf.commitIndex)
 			for i := rf.lastApplied + 1; i <= rf.commitIndex; i++ {
-				if i <= rf.LastIncludedIndex {
-					goto recheck
-				}
 				cmd := rf.getLogCommand(i)
 				if cmd == nil {
 					log.Fatalf("index %d cmd is nil", i)
@@ -683,8 +672,8 @@ func (rf *Raft) applyCommandsLoop() {
 					SnapshotValid: false,
 				}
 				rf.applyCh <- msg
-				rf.setAppliedIndex(i)
 			}
+			rf.lastApplied = rf.commitIndex
 		}
 		time.Sleep(time.Millisecond * 100)
 	}
@@ -917,10 +906,9 @@ func (rf *Raft) InstallSnapshot(args *InstallSnapshotArgs, reply *InstallSnapsho
 		}
 	}
 	rf.leaderId = args.LeaderId
-	if args.LastIncludedIndex < rf.LastIncludedIndex || args.LastIncludedTerm < rf.LastIncludedTerm {
-		rf.dprintf("Error: install snapshot with smaller last index or term")
+	if args.LastIncludedIndex == -1 {
+		log.Fatalln("LastIncludedIndex == -1 !!!!!!!!!!!!!!!!")
 	}
-
 	if args.LastIncludedIndex <= rf.LastIncludedIndex {
 		rf.dprintf("receive older snapshot on index %d", args.LastIncludedIndex)
 		return
@@ -939,8 +927,9 @@ func (rf *Raft) InstallSnapshot(args *InstallSnapshotArgs, reply *InstallSnapsho
 	rf.LastIncludedTerm = args.LastIncludedTerm
 	rf.persister.SaveSnapshot(args.Data)
 	rf.dprintf("server(%d) install snapshot on index = %d", rf.me, rf.LastIncludedIndex)
-	rf.setCommitIndex(args.LastIncludedIndex)
-	rf.setAppliedIndex(args.LastIncludedIndex)
+	// rf.setCommitIndex(args.LastIncludedIndex)
+	rf.commitIndex = args.LastIncludedIndex
+	rf.lastApplied = args.LastIncludedIndex
 	rf.persist()
 
 	restoreMsg := ApplyMsg{
@@ -1040,7 +1029,10 @@ func Make(peers []*labrpc.ClientEnd, me int,
 	// persistent data
 	if persister.ReadRaftState() != nil {
 		rf.readPersist(persister.ReadRaftState())
-		rf.setAppliedIndex(rf.LastIncludedIndex)
+		if rf.LastIncludedIndex >= 0 {
+			rf.lastApplied = rf.LastIncludedIndex
+			rf.commitIndex = rf.LastIncludedIndex
+		}
 	} else {
 		rf.CurrentTerm = 0
 		rf.VotedFor = -1

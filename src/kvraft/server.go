@@ -91,6 +91,7 @@ func (kv *KVServer) readSnapshot(data []byte) {
 	}
 	kv.db = db
 	kv.lastRequestId = lastRequestId
+	kv.printInfo("READING SNAPSHOT")
 }
 
 func (kv *KVServer) duplicateRequest(clientId int64, requestId int) bool {
@@ -199,12 +200,17 @@ func (kv *KVServer) dprintf(format string, a ...interface{}) {
 	}
 }
 
-func (kv *KVServer) printInfo() {
+func (kv *KVServer) printInfo(msg string) {
+	log.Println(msg)
+	log.Printf("server(%d)", kv.rf.GetId())
 	for k, v := range kv.lastRequestId {
 		log.Printf("lastId[%v] = %v", k, v)
 	}
 	log.Printf("LastLogIndex = %d", kv.rf.LastIncludedIndex)
 	for _, e := range kv.rf.Logs {
+		if e.Command == nil {
+			continue
+		}
 		cmd := e.Command.(Op)
 		log.Printf("entry %d: %v-%v", e.LogIndex, cmd.ClientId, cmd.RequestId)
 	}
@@ -221,12 +227,13 @@ func (kv *KVServer) applier() {
 			if err := d.Decode(&kv.lastRequestId); err != nil {
 				log.Fatalln("decode error:", err)
 			}
+			kv.printInfo("RECEIVE SNAPSHOT")
 		}
 		if m.CommandValid {
 			op := m.Command.(Op)
 			if !kv.duplicateRequest(op.ClientId, op.RequestId) {
 				if op.RequestId != kv.lastRequestId[op.ClientId]+1 {
-					kv.printInfo()
+					kv.printInfo("ERROR")
 					log.Fatalf("server(%d) execute client(%v) requests not in serial order,\nexpected: %v, actual %v", kv.rf.GetId(), op.ClientId, kv.lastRequestId[op.ClientId]+1, op.RequestId)
 				}
 				kv.lastRequestId[op.ClientId] = op.RequestId
