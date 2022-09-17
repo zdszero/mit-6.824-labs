@@ -13,7 +13,7 @@ import (
 )
 
 const (
-	Debug                  = 1
+	Debug                  = 0
 	ConsensusTimeout       = 500
 	SnapshotCheckInterval  = 100
 	SnapshotThresholdRatio = 0.9
@@ -199,6 +199,17 @@ func (kv *KVServer) dprintf(format string, a ...interface{}) {
 	}
 }
 
+func (kv *KVServer) printInfo() {
+	for k, v := range kv.lastRequestId {
+		log.Printf("lastId[%v] = %v", k, v)
+	}
+	log.Printf("LastLogIndex = %d", kv.rf.LastIncludedIndex)
+	for _, e := range kv.rf.Logs {
+		cmd := e.Command.(Op)
+		log.Printf("entry %d: %v-%v", e.LogIndex, cmd.ClientId, cmd.RequestId)
+	}
+}
+
 func (kv *KVServer) applier() {
 	for m := range kv.applyCh {
 		if m.SnapshotValid {
@@ -215,6 +226,7 @@ func (kv *KVServer) applier() {
 			op := m.Command.(Op)
 			if !kv.duplicateRequest(op.ClientId, op.RequestId) {
 				if op.RequestId != kv.lastRequestId[op.ClientId]+1 {
+					kv.printInfo()
 					log.Fatalf("server(%d) execute client(%v) requests not in serial order,\nexpected: %v, actual %v", kv.rf.GetId(), op.ClientId, kv.lastRequestId[op.ClientId]+1, op.RequestId)
 				}
 				kv.lastRequestId[op.ClientId] = op.RequestId
@@ -238,8 +250,8 @@ func (kv *KVServer) applier() {
 			}
 			// notify the RPC to return OK
 			if ch, ok := kv.waitApplyCh[m.CommandIndex]; ok {
-				// kv.dprintf("(%v-%v) index %d done", op.ClientId, op.RequestId, m.CommandIndex)
-				DPrintf("server(%d) (%v-%v) index %d done", kv.rf.GetId(), op.ClientId, op.RequestId, m.CommandIndex)
+				kv.dprintf("(%v-%v) index %d done", op.ClientId, op.RequestId, m.CommandIndex)
+				// log.Printf("server(%d) (%v-%v) index %d done", kv.rf.GetId(), op.ClientId, op.RequestId, m.CommandIndex)
 				ch <- op
 			}
 		}

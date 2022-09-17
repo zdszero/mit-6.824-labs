@@ -220,7 +220,6 @@ func (rf *Raft) persist() {
 	if err := e.Encode(rf.CurrentTerm); err != nil {
 		log.Fatal("encode error:", err)
 	}
-
 	if err := e.Encode(rf.VotedFor); err != nil {
 		log.Fatal("encode error:", err)
 	}
@@ -293,7 +292,7 @@ func (rf *Raft) readPersist(data []byte) {
 	rf.CurrentTerm = currentTerm
 	rf.VotedFor = votedFor
 	rf.Logs = logs
-	rf.LastIncludedTerm = lastIncludedIndex
+	rf.LastIncludedIndex = lastIncludedIndex
 	rf.LastIncludedTerm = lastIncludedTerm
 }
 
@@ -667,7 +666,7 @@ func (rf *Raft) applyCommands() {
 				}
 				rf.applyCh <- msg
 			}
-			rf.lastApplied = rf.commitIndex
+			rf.setAppliedIndex(rf.commitIndex)
 		}
 		time.Sleep(time.Millisecond * 100)
 	}
@@ -868,6 +867,7 @@ func (rf *Raft) Snapshot(index int, snapshot []byte) {
 	rf.LastIncludedIndex = index
 	rf.LastIncludedTerm = tmpTerm
 	rf.persister.SaveStateAndSnapshot(rf.getStateData(), snapshot)
+	rf.dprintf("server(%d) take snapshot on index = %d", rf.me, rf.LastIncludedIndex)
 }
 
 type InstallSnapshotArgs struct {
@@ -900,7 +900,7 @@ func (rf *Raft) InstallSnapshot(args *InstallSnapshotArgs, reply *InstallSnapsho
 	}
 	rf.leaderId = args.LeaderId
 	if args.LastIncludedIndex < rf.LastIncludedIndex || args.LastIncludedTerm < rf.LastIncludedTerm {
-		log.Fatalln("Error: install snapshot with smaller last index or term")
+		rf.dprintf("Error: install snapshot with smaller last index or term")
 	}
 
 	if args.LastIncludedIndex <= rf.LastIncludedIndex {
@@ -919,6 +919,7 @@ func (rf *Raft) InstallSnapshot(args *InstallSnapshotArgs, reply *InstallSnapsho
 
 	rf.LastIncludedIndex = args.LastIncludedIndex
 	rf.LastIncludedTerm = args.LastIncludedTerm
+	log.Printf("server(%d) install snapshot on index = %d", rf.me, rf.LastIncludedIndex)
 	rf.setCommitIndex(args.LastIncludedIndex)
 	rf.setAppliedIndex(args.LastIncludedIndex)
 	rf.persist()
@@ -987,13 +988,11 @@ func (rf *Raft) sendSnapshot(server int) int {
 func Make(peers []*labrpc.ClientEnd, me int,
 	persister *Persister, applyCh chan ApplyMsg) *Raft {
 	rf := &Raft{}
+
+	// volatitle data
 	rf.peers = peers
 	rf.persister = persister
 	rf.me = me
-
-	// Your initialization code here (2A, 2B, 2C).
-	rf.CurrentTerm = 0
-	rf.VotedFor = -1
 	s := rand.NewSource(time.Now().UnixNano())
 	rf.rand = rand.New(s)
 	rf.state = Follower
@@ -1010,20 +1009,24 @@ func Make(peers []*labrpc.ClientEnd, me int,
 	rf.lastApplied = 0
 	rf.nextIndex = make([]int, len(peers))
 	rf.matchIndex = make([]int, len(peers))
-	rf.Logs = append(rf.Logs, LogEntry{
-		Term:     0,
-		LogIndex: 0,
-		Command:  nil,
-	})
-	for i := 0; i < len(peers); i++ {
-		rf.nextIndex[i] = rf.getLastLogIndex()
-		rf.matchIndex[i] = 0
-	}
 	rf.cond = sync.NewCond(&sync.Mutex{})
-	rf.LastIncludedIndex = -1
-	rf.LastIncludedTerm = 0
-	// initialize from state persisted before a crash
-	rf.readPersist(persister.ReadRaftState())
+
+	// persistent data
+	if persister.ReadRaftState() != nil {
+		rf.readPersist(persister.ReadRaftState())
+		rf.setAppliedIndex(rf.LastIncludedIndex)
+	} else {
+		rf.CurrentTerm = 0
+		rf.VotedFor = -1
+		paddingEntry := LogEntry{
+			Term:     0,
+			LogIndex: 0,
+			Command:  nil,
+		}
+		rf.Logs = []LogEntry{paddingEntry}
+		rf.LastIncludedIndex = -1
+		rf.LastIncludedTerm = 0
+	}
 	go rf.mainRoutine()
 
 	return rf
