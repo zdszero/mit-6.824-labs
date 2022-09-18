@@ -319,7 +319,6 @@ type RequestVoteReply struct {
 }
 
 type AppendEntriesArgs struct {
-	IsHeartbeat  bool
 	Term         int
 	LeaderId     int
 	LeaderCommit int
@@ -404,19 +403,11 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 		rf.leaderFoundCh <- struct{}{}
 		rf.dprintf("recv heartbeat, convert to follower")
 	}
-	if args.IsHeartbeat {
-		rf.leaderId = args.LeaderId
-		if args.LeaderCommit > rf.commitIndex {
-			rf.commitIndex = max((min(args.LeaderCommit, rf.getLastLogIndex())), rf.commitIndex)
-			rf.dprintf("commitIndex(heartbeat) = %d", rf.commitIndex)
-		}
-		return
-	}
 	if args.PrevLogIndex < rf.LastIncludedIndex {
 		reply.Success = true
 		return
 	}
-	if args.PrevLogIndex >= 0 {
+	if len(args.Entries) > 0 {
 		lastLogIndex := rf.getLastLogIndex()
 		// if log is shorter than leader's
 		if lastLogIndex < args.PrevLogIndex {
@@ -471,11 +462,13 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 			rf.dprintf("APPEND %3d{%3d}: %v", e.LogIndex, rf.CurrentTerm, e.Command)
 		}
 		rf.persist()
-		reply.Success = true
-	} else {
-		// initial heartbeat
-		reply.Success = true
 	}
+	if args.LeaderCommit > rf.commitIndex {
+		rf.commitIndex = max((min(args.LeaderCommit, rf.getLastLogIndex())), rf.commitIndex)
+		rf.dprintf("commitIndex(heartbeat) = %d", rf.commitIndex)
+	}
+	rf.leaderId = args.LeaderId
+	reply.Success = true
 }
 
 func (rf *Raft) sendRequestVote(server int, args *RequestVoteArgs, reply *RequestVoteReply) int {
@@ -565,7 +558,6 @@ func (rf *Raft) replicateLog(server int) bool {
 	}
 	prevLogIndex := rf.nextIndex[server] - 1
 	args := &AppendEntriesArgs{
-		IsHeartbeat:  false,
 		Term:         rf.CurrentTerm,
 		LeaderId:     rf.me,
 		PrevLogIndex: prevLogIndex,
@@ -845,7 +837,6 @@ func (rf *Raft) notifyFollowersLoop() {
 				continue
 			}
 			args := &AppendEntriesArgs{
-				IsHeartbeat:  true,
 				Term:         rf.CurrentTerm,
 				LeaderId:     rf.me,
 				LeaderCommit: min(rf.matchIndex[server], rf.commitIndex),
