@@ -403,11 +403,11 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 		rf.leaderFoundCh <- struct{}{}
 		rf.dprintf("recv heartbeat, convert to follower")
 	}
-	if args.PrevLogIndex < rf.LastIncludedIndex {
-		reply.Success = true
-		return
-	}
 	if len(args.Entries) > 0 {
+		if args.PrevLogIndex < rf.LastIncludedIndex {
+			reply.Success = true
+			return
+		}
 		lastLogIndex := rf.getLastLogIndex()
 		// if log is shorter than leader's
 		if lastLogIndex < args.PrevLogIndex {
@@ -560,6 +560,7 @@ func (rf *Raft) replicateLog(server int) bool {
 	args := &AppendEntriesArgs{
 		Term:         rf.CurrentTerm,
 		LeaderId:     rf.me,
+		LeaderCommit: min(rf.matchIndex[server], rf.commitIndex),
 		PrevLogIndex: prevLogIndex,
 		PrevLogTerm:  rf.getLogTerm(prevLogIndex),
 		Entries:      rf.getLogAfter(prevLogIndex),
@@ -855,7 +856,7 @@ func (rf *Raft) notifyFollowersLoop() {
 func (rf *Raft) Snapshot(index int, snapshot []byte) {
 	rf.mu.Lock()
 	defer rf.mu.Unlock()
-	if index <= rf.LastIncludedTerm {
+	if index <= rf.LastIncludedIndex {
 		return
 	}
 	tmpTerm := rf.getLogTerm(index)
@@ -864,6 +865,7 @@ func (rf *Raft) Snapshot(index int, snapshot []byte) {
 	rf.Logs = tempLogs
 	rf.LastIncludedIndex = index
 	rf.LastIncludedTerm = tmpTerm
+	rf.persist()
 	rf.persister.SaveSnapshot(snapshot)
 	rf.dprintf("server(%d) take snapshot on index = %d", rf.me, rf.LastIncludedIndex)
 }
