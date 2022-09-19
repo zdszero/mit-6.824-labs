@@ -469,7 +469,7 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 		if commit > rf.commitIndex {
 			rf.commitIndex = commit
 			select {
-			case rf.applyTriggerCh<-struct{}{}:
+			case rf.applyTriggerCh <- struct{}{}:
 			default:
 			}
 			// rf.dprintf("commitIndex = %d", rf.commitIndex)
@@ -914,10 +914,7 @@ func (rf *Raft) InstallSnapshot(args *InstallSnapshotArgs, reply *InstallSnapsho
 		}
 	}
 	rf.leaderId = args.LeaderId
-	if args.LastIncludedIndex == -1 {
-		log.Fatalln("LastIncludedIndex == -1 !!!!!!!!!!!!!!!!")
-	}
-	if args.LastIncludedIndex <= rf.LastIncludedIndex {
+	if args.LastIncludedIndex <= rf.LastIncludedIndex || args.LastIncludedIndex <= rf.lastApplied {
 		rf.dprintf("receive older snapshot on index %d", args.LastIncludedIndex)
 		return
 	}
