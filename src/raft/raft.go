@@ -104,6 +104,7 @@ type Raft struct {
 	leaderFoundCh   chan struct{} // candidate
 	applyCh         chan ApplyMsg // leader
 	killCh          chan struct{}
+	applyTriggerCh  chan struct{}
 
 	// persistent
 	CurrentTerm       int
@@ -464,8 +465,15 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 		rf.persist()
 	}
 	if args.LeaderCommit > rf.commitIndex {
-		rf.commitIndex = max((min(args.LeaderCommit, rf.getLastLogIndex())), rf.commitIndex)
-		rf.dprintf("commitIndex(heartbeat) = %d", rf.commitIndex)
+		commit := min(args.LeaderCommit, rf.getLastLogIndex())
+		if commit > rf.commitIndex {
+			rf.commitIndex = commit
+			select {
+			case rf.applyTriggerCh<-struct{}{}:
+			default:
+			}
+			// rf.dprintf("commitIndex = %d", rf.commitIndex)
+		}
 	}
 	rf.leaderId = args.LeaderId
 	reply.Success = true
@@ -607,8 +615,14 @@ func (rf *Raft) replicateLog(server int) bool {
 	match := rf.matchIndex[server]
 	// rf.dprintf("matchIndex[%d] = %d", server, rf.matchIndex[server])
 	if rf.majorityMatched(match) && rf.getLogTerm(match) == rf.CurrentTerm {
-		rf.commitIndex = max(rf.commitIndex, match)
-		rf.dprintf("commitIndex(majority) = %d", rf.commitIndex)
+		if match > rf.commitIndex {
+			rf.commitIndex = match
+			select {
+			case rf.applyTriggerCh <- struct{}{}:
+			default:
+			}
+			// rf.dprintf("commitIndex = %d", rf.commitIndex)
+		}
 	}
 	return true
 }
@@ -651,24 +665,25 @@ func (rf *Raft) majorityMatched(n int) bool {
 
 func (rf *Raft) applyCommandsLoop() {
 	for !rf.killed() {
-		if rf.lastApplied < rf.commitIndex {
-			rf.dprintf(" APPLY %d-%d", rf.lastApplied, rf.commitIndex)
-			for i := rf.lastApplied + 1; i <= rf.commitIndex; i++ {
-				cmd := rf.getLogCommand(i)
-				if cmd == nil {
-					log.Fatalf("index %d cmd is nil", i)
-				}
-				msg := ApplyMsg{
-					CommandValid:  true,
-					Command:       cmd,
-					CommandIndex:  i,
-					SnapshotValid: false,
-				}
-				rf.applyCh <- msg
+		<-rf.applyTriggerCh
+		rf.mu.Lock()
+		for rf.lastApplied < rf.commitIndex {
+			rf.lastApplied++
+			cmd := rf.getLogCommand(rf.lastApplied)
+			if cmd == nil {
+				log.Fatalf("index %d cmd is nil", rf.lastApplied)
 			}
-			rf.lastApplied = rf.commitIndex
+			msg := ApplyMsg{
+				CommandValid:  true,
+				Command:       cmd,
+				CommandIndex:  rf.lastApplied,
+				SnapshotValid: false,
+			}
+			rf.mu.Unlock()
+			rf.applyCh <- msg
+			rf.mu.Lock()
 		}
-		time.Sleep(time.Millisecond * 100)
+		rf.mu.Unlock()
 	}
 	close(rf.applyCh)
 }
@@ -920,8 +935,10 @@ func (rf *Raft) InstallSnapshot(args *InstallSnapshotArgs, reply *InstallSnapsho
 	rf.LastIncludedTerm = args.LastIncludedTerm
 	rf.persister.SaveSnapshot(args.Data)
 	rf.dprintf("server(%d) install snapshot on index = %d", rf.me, rf.LastIncludedIndex)
-	// rf.setCommitIndex(args.LastIncludedIndex)
-	rf.commitIndex = args.LastIncludedIndex
+	if args.LastIncludedIndex > rf.commitIndex {
+		// don't need to send to applyTriggerCh
+		rf.commitIndex = args.LastIncludedIndex
+	}
 	rf.lastApplied = args.LastIncludedIndex
 	rf.persist()
 
@@ -1012,6 +1029,7 @@ func Make(peers []*labrpc.ClientEnd, me int,
 	rf.leaderFoundCh = make(chan struct{}, 1)
 	rf.killCh = make(chan struct{}, 1)
 	rf.applyCh = applyCh
+	rf.applyTriggerCh = make(chan struct{}, 1)
 
 	rf.commitIndex = 0
 	rf.lastApplied = 0

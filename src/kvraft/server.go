@@ -91,7 +91,7 @@ func (kv *KVServer) readSnapshot(data []byte) {
 	}
 	kv.db = db
 	kv.lastRequestId = lastRequestId
-	kv.printInfo("READING SNAPSHOT")
+	// kv.printInfo("READING SNAPSHOT")
 }
 
 func (kv *KVServer) duplicateRequest(clientId int64, requestId int) bool {
@@ -227,7 +227,7 @@ func (kv *KVServer) applier() {
 			if err := d.Decode(&kv.lastRequestId); err != nil {
 				log.Fatalln("decode error:", err)
 			}
-			kv.printInfo("RECEIVE SNAPSHOT")
+			// kv.printInfo("RECEIVE SNAPSHOT")
 		}
 		if m.CommandValid {
 			op := m.Command.(Op)
