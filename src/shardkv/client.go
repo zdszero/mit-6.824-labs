@@ -8,11 +8,14 @@ package shardkv
 // talks to the group that holds the key's shard.
 //
 
-import "mit-6.824/labrpc"
-import "crypto/rand"
-import "math/big"
-import "mit-6.824/shardmaster"
-import "time"
+import (
+	"crypto/rand"
+	"math/big"
+	"time"
+
+	"mit-6.824/labrpc"
+	"mit-6.824/shardmaster"
+)
 
 //
 // which shard is a key in?
@@ -40,6 +43,8 @@ type Clerk struct {
 	config   shardmaster.Config
 	make_end func(string) *labrpc.ClientEnd
 	// You will have to modify this struct.
+	me int64
+	opId int
 }
 
 //
@@ -55,7 +60,8 @@ func MakeClerk(masters []*labrpc.ClientEnd, make_end func(string) *labrpc.Client
 	ck := new(Clerk)
 	ck.sm = shardmaster.MakeClerk(masters)
 	ck.make_end = make_end
-	// You'll have to add code here.
+	ck.me = nrand()
+	ck.opId = 1
 	return ck
 }
 
@@ -68,10 +74,15 @@ func MakeClerk(masters []*labrpc.ClientEnd, make_end func(string) *labrpc.Client
 func (ck *Clerk) Get(key string) string {
 	args := GetArgs{}
 	args.Key = key
+	args.ClinetId = ck.me
+	args.OpId = ck.opId
+	ck.opId++
 
 	for {
 		shard := key2shard(key)
 		gid := ck.config.Shards[shard]
+		args.Shard = shard
+		args.GID = gid
 		if servers, ok := ck.config.Groups[gid]; ok {
 			// try each server for the shard.
 			for si := 0; si < len(servers); si++ {
@@ -101,14 +112,22 @@ func (ck *Clerk) Get(key string) string {
 //
 func (ck *Clerk) PutAppend(key string, value string, op string) {
 	args := PutAppendArgs{}
+	if op == "Put" {
+		args.Method = PutOp
+	} else {
+		args.Method = AppendOp
+	}
 	args.Key = key
 	args.Value = value
-	args.Op = op
-
+	args.ClinetId = ck.me
+	args.OpId = ck.opId
+	ck.opId++
 
 	for {
 		shard := key2shard(key)
 		gid := ck.config.Shards[shard]
+		args.Shard = shard
+		args.GID = gid
 		if servers, ok := ck.config.Groups[gid]; ok {
 			for si := 0; si < len(servers); si++ {
 				srv := ck.make_end(servers[si])

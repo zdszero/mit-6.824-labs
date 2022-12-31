@@ -30,6 +30,16 @@ type Config struct {
 	Groups map[int][]string // gid -> servers[]
 }
 
+func (cfg *Config) CollectShards(gid int) []int {
+	shards := []int{}
+	for s, g := range cfg.Shards {
+		if g == gid {
+			shards = append(shards, s)
+		}
+	}
+	return shards
+}
+
 const (
 	Debug = 1
 	OK    = "OK"

@@ -281,7 +281,7 @@ func (sm *ShardMaster) applier() {
 			case Query:
 				queryArg := op.Args.(QueryArgs)
 				num := queryArg.Num
-				if num < 0 || num > len(sm.configs) {
+				if num < 0 || num >= len(sm.configs) {
 					// initial: len(config) == 0, num < 0
 					num = len(sm.configs) - 1
 				}

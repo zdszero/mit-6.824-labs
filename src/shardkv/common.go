@@ -1,5 +1,9 @@
 package shardkv
 
+import (
+	"log"
+)
+
 //
 // Sharded key/value server.
 // Lots of replica groups, each running op-at-a-time paxos.
@@ -10,23 +14,35 @@ package shardkv
 //
 
 const (
-	OK             = "OK"
-	ErrNoKey       = "ErrNoKey"
-	ErrWrongGroup  = "ErrWrongGroup"
-	ErrWrongLeader = "ErrWrongLeader"
+	OK                = "OK"
+	ErrNoKey          = "ErrNoKey"
+	ErrWrongGroup     = "ErrWrongGroup"
+	ErrWrongLeader    = "ErrWrongLeader"
+	ErrNotReady       = "ErrNotReady"
+	ErrDuplicate      = "ErrDuplicate"
+	ErrFinished       = "ErrFinished"
+	Debug             = 1
 )
 
 type Err string
 
+func DPrintf(format string, a ...interface{}) (n int, err error) {
+	if Debug > 0 {
+		log.Printf(format, a...)
+	}
+	return
+}
+
 // Put or Append
 type PutAppendArgs struct {
 	// You'll have to add definitions here.
-	Key   string
-	Value string
-	Op    string // "Put" or "Append"
-	// You'll have to add definitions here.
-	// Field names must start with capital letters,
-	// otherwise RPC will break.
+	Method   OpMethod
+	Key      string
+	Value    string
+	Shard    int
+	GID      int
+	ClinetId int64
+	OpId     int
 }
 
 type PutAppendReply struct {
@@ -34,8 +50,11 @@ type PutAppendReply struct {
 }
 
 type GetArgs struct {
-	Key string
-	// You'll have to add definitions here.
+	Key      string
+	Shard    int
+	GID      int
+	ClinetId int64
+	OpId     int
 }
 
 type GetReply struct {
