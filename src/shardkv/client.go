@@ -43,8 +43,20 @@ type Clerk struct {
 	config   shardmaster.Config
 	make_end func(string) *labrpc.ClientEnd
 	// You will have to modify this struct.
-	me int64
+	me   int64
 	opId int
+}
+
+func (ck *Clerk) buildCommonArgs(shard int, gid int) CommonArgs {
+	opId := ck.opId
+	ck.opId++
+	return CommonArgs{
+		CfgNum:   ck.config.Num,
+		Shard:    shard,
+		GID:      gid,
+		ClientId: ck.me,
+		OpId:     opId,
+	}
 }
 
 //
@@ -74,15 +86,12 @@ func MakeClerk(masters []*labrpc.ClientEnd, make_end func(string) *labrpc.Client
 func (ck *Clerk) Get(key string) string {
 	args := GetArgs{}
 	args.Key = key
-	args.ClinetId = ck.me
-	args.OpId = ck.opId
-	ck.opId++
 
 	for {
 		shard := key2shard(key)
 		gid := ck.config.Shards[shard]
-		args.Shard = shard
-		args.GID = gid
+		args.Common = ck.buildCommonArgs(shard, gid)
+		args.Common = ck.buildCommonArgs(shard, gid)
 		if servers, ok := ck.config.Groups[gid]; ok {
 			// try each server for the shard.
 			for si := 0; si < len(servers); si++ {
@@ -110,24 +119,16 @@ func (ck *Clerk) Get(key string) string {
 // shared by Put and Append.
 // You will have to modify this function.
 //
-func (ck *Clerk) PutAppend(key string, value string, op string) {
+func (ck *Clerk) PutAppend(key string, value string, method OpMethod) {
 	args := PutAppendArgs{}
-	if op == "Put" {
-		args.Method = PutOp
-	} else {
-		args.Method = AppendOp
-	}
+	args.Method = method
 	args.Key = key
 	args.Value = value
-	args.ClinetId = ck.me
-	args.OpId = ck.opId
-	ck.opId++
 
 	for {
 		shard := key2shard(key)
 		gid := ck.config.Shards[shard]
-		args.Shard = shard
-		args.GID = gid
+		args.Common = ck.buildCommonArgs(shard, gid)
 		if servers, ok := ck.config.Groups[gid]; ok {
 			for si := 0; si < len(servers); si++ {
 				srv := ck.make_end(servers[si])
@@ -149,8 +150,8 @@ func (ck *Clerk) PutAppend(key string, value string, op string) {
 }
 
 func (ck *Clerk) Put(key string, value string) {
-	ck.PutAppend(key, value, "Put")
+	ck.PutAppend(key, value, PutOp)
 }
 func (ck *Clerk) Append(key string, value string) {
-	ck.PutAppend(key, value, "Append")
+	ck.PutAppend(key, value, AppendOp)
 }

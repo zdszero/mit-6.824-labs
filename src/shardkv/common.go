@@ -15,10 +15,14 @@ import (
 
 const (
 	OK                = "OK"
+	ErrShutdown       = "ErrShutdown"
+	ErrInitElection   = "ErrInitElection"
 	ErrNoKey          = "ErrNoKey"
 	ErrWrongGroup     = "ErrWrongGroup"
 	ErrWrongLeader    = "ErrWrongLeader"
 	ErrNotReady       = "ErrNotReady"
+	ErrOutdatedConfig = "ErrOutdatedConfig"
+	ErrInMigration    = "ErrInMigration"
 	ErrDuplicate      = "ErrDuplicate"
 	ErrFinished       = "ErrFinished"
 	Debug             = 1
@@ -33,16 +37,27 @@ func DPrintf(format string, a ...interface{}) (n int, err error) {
 	return
 }
 
-// Put or Append
-type PutAppendArgs struct {
-	// You'll have to add definitions here.
-	Method   OpMethod
-	Key      string
-	Value    string
+type ClerkArgs interface {
+	GetCfgNum() int
+	GetGid() int
+	GetShard() int
+	GetClientId() int64
+	GetOpId() int
+}
+
+type CommonArgs struct {
+	CfgNum   int
 	Shard    int
 	GID      int
-	ClinetId int64
+	ClientId int64
 	OpId     int
+}
+
+type PutAppendArgs struct {
+	Method OpMethod
+	Key    string
+	Value  string
+	Common CommonArgs
 }
 
 type PutAppendReply struct {
@@ -50,14 +65,23 @@ type PutAppendReply struct {
 }
 
 type GetArgs struct {
-	Key      string
-	Shard    int
-	GID      int
-	ClinetId int64
-	OpId     int
+	Key    string
+	Common CommonArgs
 }
 
 type GetReply struct {
 	Err   Err
 	Value string
 }
+
+func (args PutAppendArgs) GetCfgNum() int     { return args.Common.CfgNum }
+func (args PutAppendArgs) GetGid() int        { return args.Common.GID }
+func (args PutAppendArgs) GetShard() int      { return args.Common.Shard }
+func (args PutAppendArgs) GetClientId() int64 { return args.Common.ClientId }
+func (args PutAppendArgs) GetOpId() int       { return args.Common.OpId }
+
+func (args GetArgs) GetCfgNum() int     { return args.Common.CfgNum }
+func (args GetArgs) GetGid() int        { return args.Common.GID }
+func (args GetArgs) GetShard() int      { return args.Common.Shard }
+func (args GetArgs) GetClientId() int64 { return args.Common.ClientId }
+func (args GetArgs) GetOpId() int       { return args.Common.OpId }
