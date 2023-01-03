@@ -306,6 +306,9 @@ CheckTermAndWaitReply:
 		}
 	}
 
+	// avoid applier from blocking and resource leak
+	go func() { <- c }()
+
 	if kv.killed() {
 		e = ErrShutdown
 	}
@@ -364,7 +367,7 @@ func (kv *ShardKV) applier() {
 		case ConfigChangeStart:
 			cfg := cmd.Data.(shardmaster.Config)
 			if cfg.Num <= kv.CurrCfg.Num {
-				continue
+				break
 			}
 			if cfg.Num != kv.CurrCfg.Num+1 {
 				log.Fatalf("Receive config number %d, curr is %d", cfg.Num, kv.CurrCfg.Num)
