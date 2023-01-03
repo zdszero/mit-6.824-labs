@@ -16,7 +16,7 @@ const (
 	Debug                  = 0
 	ConsensusTimeout       = 500
 	SnapshotCheckInterval  = 100
-	SnapshotThresholdRatio = 0.9
+	SnapshotThresholdRatio = 0.8
 )
 
 func DPrintf(format string, a ...interface{}) (n int, err error) {
