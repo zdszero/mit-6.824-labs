@@ -57,8 +57,8 @@ type ShardStatus int
 const (
 	Serving ShardStatus = iota
 	Pulling
-	Erasing
 	Waiting
+	Erasing
 )
 
 type Shard struct {
@@ -99,8 +99,8 @@ type ClientOp struct {
 	// Your definitions here.
 	// Field names must start with capital letters,
 	// otherwise RPC will break.
-	Method   OpMethod
-	Args     ClerkArgs
+	Method OpMethod
+	Args   ClerkArgs
 }
 
 type requestResult struct {
@@ -111,11 +111,6 @@ type requestResult struct {
 type commandEntry struct {
 	cmd     RaftLogCommand
 	replyCh chan requestResult
-}
-
-type cache struct {
-	opId   int
-	result requestResult
 }
 
 type RemoveShardOp struct {
@@ -142,7 +137,7 @@ type ShardKV struct {
 	PrevCfg           shardmaster.Config
 	CurrCfg           shardmaster.Config
 	Shards            map[int]Shard        // shard -> DB: (key -> value)
-	ClientTbl         map[int64]cache        // client id -> last op id
+	ClientTbl         map[int64]int        // client id -> last op id
 	commandTbl        map[int]commandEntry // index -> wait channel
 	waitPullCh        chan int
 	configPollTrigger chan bool
@@ -181,8 +176,8 @@ func (kv *ShardKV) snapshotData() []byte {
 	if enc.Encode(kv.CurrCfg) != nil ||
 		enc.Encode(kv.Shards) != nil ||
 		enc.Encode(kv.ClientTbl) != nil {
-			log.Fatalln("encode snapshot failed")
-		}
+		log.Fatalln("encode snapshot failed")
+	}
 	return w.Bytes()
 }
 
@@ -194,7 +189,7 @@ func (kv *ShardKV) readSnapshot(data []byte) {
 	d := labgob.NewDecoder(r)
 	var cfg shardmaster.Config
 	var shards map[int]Shard
-	var clientTbl map[int64]cache
+	var clientTbl map[int64]int
 	if d.Decode(&cfg) != nil ||
 		d.Decode(&shards) != nil ||
 		d.Decode(&clientTbl) == nil {
@@ -216,7 +211,7 @@ func (kv *ShardKV) checkShardStatus(si int) Err {
 	}
 	if shard.Status == Serving {
 		return OK
-	} else if shard.Status == Waiting {
+	} else if shard.Status == Pulling {
 		return ErrInMigration
 	} else {
 		return ErrWrongGroup
@@ -240,12 +235,6 @@ func (kv *ShardKV) commonHandler(cmd RaftLogCommand) (e Err, r interface{}) {
 	switch cmd.CommandType {
 	case ClientRequest:
 		cliOp := cmd.Data.(ClientOp)
-		opCache, ok := kv.ClientTbl[cliOp.Args.GetClientId()]
-		if ok && opCache.result.err == OK && opCache.opId > cliOp.Args.GetOpId() {
-			e = OK
-			r = opCache.result
-			return
-		}
 		if cliOp.Args.GetCfgNum() > kv.CurrCfg.Num {
 			kv.triggerConfigPoll()
 			e = ErrNotReady
@@ -319,11 +308,11 @@ func (kv *ShardKV) PutAppend(args *PutAppendArgs, reply *PutAppendReply) {
 // apply functions
 //
 func (kv *ShardKV) isOpDuplicate(op ClientOp) bool {
-	opCache, ok := kv.ClientTbl[op.Args.GetClientId()]
+	lastOpId, ok := kv.ClientTbl[op.Args.GetClientId()]
 	if !ok {
 		return false
 	}
-	if op.Args.GetOpId() <= opCache.opId {
+	if op.Args.GetOpId() <= lastOpId {
 		return true
 	} else {
 		return false
@@ -359,16 +348,6 @@ func (kv *ShardKV) applier() {
 			// save previous config
 			kv.PrevCfg = kv.CurrCfg
 			kv.CurrCfg = cfg
-			// change shard status
-			for si, g := range cfg.Shards {
-				if g == kv.gid {
-					if shard, ok := kv.Shards[si]; ok {
-						shard.Status = Serving
-					} else {
-						kv.Shards[si] = newShard(Serving)
-					}
-				}
-			}
 			kv.dprintf(true, "config %d start", cfg.Num)
 		case ConfigChangeEnd:
 			cfgNum := cmd.Data.(int)
@@ -403,6 +382,7 @@ func (kv *ShardKV) applier() {
 
 func (kv *ShardKV) applyClientRequest(op ClientOp) (reply requestResult) {
 	si := op.Args.GetShard()
+	kv.ClientTbl[op.Args.GetClientId()] = op.Args.GetOpId()
 	switch {
 	case op.Method == GetOp:
 		args := op.Args.(GetArgs)
@@ -417,23 +397,13 @@ func (kv *ShardKV) applyClientRequest(op ClientOp) (reply requestResult) {
 			return
 		}
 		reply.value = value
-		opCache, ok := kv.ClientTbl[op.Args.GetClientId()]
-		if !ok {
-			kv.ClientTbl[op.Args.GetClientId()] = cache{
-				opId:   op.Args.GetOpId(),
-				result: reply,
-			}
-		} else {
-			opCache.opId = op.Args.GetOpId()
-			opCache.result = reply
-		}
+		reply.err = OK
 		kv.dprintf(true, "get %v:%v from shard %v", args.Key, value, si)
 	case op.Method == PutOp:
 		args := op.Args.(PutAppendArgs)
 		db, ok := kv.Shards[si]
 		if !ok {
-			db = newShard(Serving)
-			kv.Shards[si] = db
+			log.Fatalf("shard %d not exist when put", si)
 		}
 		db.KV[args.Key] = args.Value
 		kv.dprintf(true, "put %v:%v on shard %v", args.Key, args.Value, si)
@@ -441,8 +411,7 @@ func (kv *ShardKV) applyClientRequest(op ClientOp) (reply requestResult) {
 		args := op.Args.(PutAppendArgs)
 		db, ok := kv.Shards[si]
 		if !ok {
-			db = newShard(Serving)
-			kv.Shards[si] = db
+			log.Fatalf("shard %d not exist when append", si)
 		}
 		value, ok := db.KV[args.Key]
 		if ok {
@@ -474,27 +443,57 @@ func (kv *ShardKV) PullShards(args *PullShardsArgs, reply *PullShardsReply) {
 	if kv.CurrCfg.Num != args.CfgNum {
 		panic("PullShards RPC called with different config number")
 	}
+	prepared := true
+	for _, si := range args.ShardNums {
+		if kv.Shards[si].Status != Waiting {
+			prepared = false
+			break
+		}
+	}
+	if !prepared {
+		reply.Err = ErrNotReady
+		return
+	}
 	replyShards := make(map[int]Shard)
 	for _, si := range args.ShardNums {
 		replyShards[si] = copyShard(kv.Shards[si])
+		if shard, ok := kv.Shards[si]; ok {
+			shard.Status = Erasing
+			kv.Shards[si] = shard
+		}
 	}
 	reply.Err = OK
 	reply.Shards = replyShards
 }
 
-func (kv *ShardKV) pullShards(groupShards map[int][]int, cfg shardmaster.Config) {
+func (kv *ShardKV) getServers(gid int) []string {
+	var cfg shardmaster.Config
+	if _, ok := kv.CurrCfg.Groups[gid]; ok {
+		cfg = kv.CurrCfg
+	} else {
+		cfg = kv.PrevCfg
+	}
+	servers := cfg.Groups[gid]
+	if len(servers) == 0 {
+		panic("get servers return empty")
+	}
+	return cfg.Groups[gid]
+}
+
+func (kv *ShardKV) pullShards(groupShards map[int][]int) {
 	// gid -> pulling shard numbers
 	wg := sync.WaitGroup{}
 	for g, sis := range groupShards {
 		wg.Add(1)
-		go func(gid int, shardNums []int, cfgNum int) {
+		servers := kv.getServers(g)
+		cfgNum := kv.CurrCfg.Num
+		go func(servers []string, shardNums []int, cfgNum int) {
 			defer wg.Done()
 			args := PullShardsArgs{
 				CfgNum:    cfgNum,
 				ShardNums: shardNums,
 			}
 			reply := PullShardsReply{}
-			servers := cfg.Groups[gid]
 			done := false
 			for {
 				for _, sn := range servers {
@@ -511,7 +510,7 @@ func (kv *ShardKV) pullShards(groupShards map[int][]int, cfg shardmaster.Config)
 				}
 				time.Sleep(time.Millisecond * 100)
 			}
-		}(g, sis, cfg.Num)
+		}(servers, sis, cfgNum)
 	}
 	wg.Wait()
 }
@@ -533,23 +532,35 @@ func (kv *ShardKV) RemoveShards(args *RemoveShardsArgs, reply *RemoveShardsReply
 	if kv.CurrCfg.Num != args.CfgNum {
 		panic("RemoveShards RPC called with different config number")
 	}
+	prepared := true
+	for _, si := range args.ShardNums {
+		if kv.Shards[si].Status != Erasing {
+			prepared = false
+			break
+		}
+	}
+	if !prepared {
+		reply.Err = ErrNotReady
+		return
+	}
 	kv.commonHandler(newRaftLogCommand(RemoveShard, *args))
 	kv.waitPullCh <- len(args.ShardNums)
 	reply.Err = OK
 }
 
-func (kv *ShardKV) removeShards(groupShards map[int][]int, cfg shardmaster.Config) {
+func (kv *ShardKV) removeShards(groupShards map[int][]int) {
 	wg := sync.WaitGroup{}
 	for g, sis := range groupShards {
 		wg.Add(1)
-		go func(gid int, shardNums []int, cfgNum int) {
+		servers := kv.getServers(g)
+		cfgNum := kv.CurrCfg.Num
+		go func(servers []string, shardNums []int, cfgNum int) {
 			defer wg.Done()
 			args := RemoveShardsArgs{
 				CfgNum:    cfgNum,
 				ShardNums: shardNums,
 			}
 			reply := RemoveShardsReply{}
-			servers := cfg.Groups[gid]
 			done := false
 			for {
 				for _, sn := range servers {
@@ -565,7 +576,7 @@ func (kv *ShardKV) removeShards(groupShards map[int][]int, cfg shardmaster.Confi
 				}
 				time.Sleep(time.Millisecond * 100)
 			}
-		}(g, sis, cfg.Num)
+		}(servers, sis, cfgNum)
 	}
 	wg.Wait()
 }
@@ -606,8 +617,7 @@ type CoordinateArgs struct {
 }
 
 type CoordinateReply struct {
-	Err    Err
-	CfgNum int
+	Err Err
 }
 
 func (kv *ShardKV) CoordinateConfig(args *CoordinateArgs, reply *CoordinateReply) {
@@ -615,7 +625,6 @@ func (kv *ShardKV) CoordinateConfig(args *CoordinateArgs, reply *CoordinateReply
 	if !isLeader {
 		reply.Err = ErrWrongLeader
 	}
-	reply.CfgNum = kv.CurrCfg.Num
 	if args.CfgNum < kv.CurrCfg.Num {
 		reply.Err = ErrDuplicate
 	} else if args.CfgNum > kv.CurrCfg.Num {
@@ -634,8 +643,8 @@ func (kv *ShardKV) CoordinateConfig(args *CoordinateArgs, reply *CoordinateReply
 // else return false
 func (kv *ShardKV) coordinateConfig(gids []int) Err {
 	for _, gid := range gids {
-		servs := kv.CurrCfg.Groups[gid]
-		for _, srv := range servs {
+		servers := kv.getServers(gid)
+		for _, srv := range servers {
 			end := kv.make_end(srv)
 			args := CoordinateArgs{CfgNum: kv.CurrCfg.Num}
 			var reply CoordinateReply
@@ -697,7 +706,7 @@ func (kv *ShardKV) reconfig() {
 		time.Sleep(time.Millisecond * CoordinateInterval)
 	}
 	if err == ErrFinished {
-		kv.dprintf(true, "config finished")
+		kv.dprintf(true, "config %d finished", kv.CurrCfg.Num)
 		return
 	}
 	if len(removeGroup) == 0 && len(insertGroup) == 0 {
@@ -715,7 +724,8 @@ func (kv *ShardKV) reconfig() {
 		} else {
 			for _, si := range removed {
 				if shard, ok := kv.Shards[si]; ok {
-					shard.Status = Erasing
+					shard.Status = Waiting
+					kv.Shards[si] = shard
 				}
 			}
 			// wait for shards to be pulled by other machines
@@ -736,6 +746,7 @@ func (kv *ShardKV) reconfig() {
 		for _, si := range inserted {
 			if shard, ok := kv.Shards[si]; ok {
 				shard.Status = Pulling
+				kv.Shards[si] = shard
 			}
 		}
 		if isNullGroup(insertGroup) {
@@ -749,8 +760,8 @@ func (kv *ShardKV) reconfig() {
 			}
 			kv.commonHandler(newRaftLogCommand(InsertShard, reply))
 		} else {
-			kv.pullShards(insertGroup, newCfg)
-			kv.removeShards(insertGroup, newCfg)
+			kv.pullShards(insertGroup)
+			kv.removeShards(insertGroup)
 		}
 		kv.commonHandler(newRaftLogCommand(ConfigChangeEnd, newCfg.Num))
 	}
@@ -861,7 +872,7 @@ func StartServer(servers []*labrpc.ClientEnd, me int, persister *raft.Persister,
 	kv.mck = shardmaster.MakeClerk(masters)
 	kv.CurrCfg = shardmaster.Config{Num: 0}
 	kv.Shards = make(map[int]Shard)
-	kv.ClientTbl = make(map[int64]cache)
+	kv.ClientTbl = make(map[int64]int)
 	kv.commandTbl = make(map[int]commandEntry)
 	kv.waitPullCh = make(chan int, 1)
 	kv.configPollTrigger = make(chan bool, 1)

@@ -52,7 +52,6 @@ func TestStaticShards(t *testing.T) {
 	// make sure that the data really is sharded by
 	// shutting down one shard and checking that some
 	// Get()s don't succeed.
-	DPrintf("shutdown group 101")
 	cfg.ShutdownGroup(1)
 	cfg.checklogs() // forbid snapshots
 
@@ -83,7 +82,6 @@ func TestStaticShards(t *testing.T) {
 	}
 
 	// bring the crashed shard/group back to life.
-	DPrintf("start group 101")
 	cfg.StartGroup(1)
 	for i := 0; i < n; i++ {
 		check(t, ck, ka[i], va[i])
