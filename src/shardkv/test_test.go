@@ -320,7 +320,10 @@ func TestConcurrent1(t *testing.T) {
 	ch := make(chan bool)
 
 	ff := func(i int) {
-		defer func() { ch <- true }()
+		defer func() {
+			ch <- true
+			DPrintf("%d finished", i)
+		}()
 		ck1 := cfg.makeClient()
 		for atomic.LoadInt32(&done) == 0 {
 			x := randstring(5)
@@ -362,11 +365,13 @@ func TestConcurrent1(t *testing.T) {
 
 	time.Sleep(1 * time.Second)
 
+	DPrintf("all done")
 	atomic.StoreInt32(&done, 1)
 	for i := 0; i < n; i++ {
 		<-ch
 	}
 
+	DPrintf("final check")
 	for i := 0; i < n; i++ {
 		check(t, ck, ka[i], va[i])
 	}

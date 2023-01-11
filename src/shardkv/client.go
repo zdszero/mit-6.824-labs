@@ -97,12 +97,20 @@ func (ck *Clerk) Get(key string) string {
 			for si := 0; si < len(servers); si++ {
 				srv := ck.make_end(servers[si])
 				var reply GetReply
+			Recall:
 				ok := srv.Call("ShardKV.Get", &args, &reply)
-				if ok && (reply.Err == OK || reply.Err == ErrNoKey) {
+				if !ok {
+					continue
+				}
+				if reply.Err == OK || reply.Err == ErrNoKey {
 					return reply.Value
 				}
-				if ok && (reply.Err == ErrWrongGroup) {
+				if reply.Err == ErrWrongGroup || reply.Err == ErrOutdatedConfig {
 					break
+				}
+				if reply.Err == ErrNotReady {
+					time.Sleep(time.Millisecond * 100)
+					goto Recall
 				}
 				// ... not ok, or ErrWrongLeader
 			}
@@ -111,8 +119,6 @@ func (ck *Clerk) Get(key string) string {
 		// ask master for the latest configuration.
 		ck.config = ck.sm.Query(-1)
 	}
-
-	return ""
 }
 
 //
@@ -133,12 +139,20 @@ func (ck *Clerk) PutAppend(key string, value string, method OpMethod) {
 			for si := 0; si < len(servers); si++ {
 				srv := ck.make_end(servers[si])
 				var reply PutAppendReply
+			Recall:
 				ok := srv.Call("ShardKV.PutAppend", &args, &reply)
-				if ok && reply.Err == OK {
+				if !ok {
+					continue
+				}
+				if reply.Err == OK {
 					return
 				}
-				if ok && reply.Err == ErrWrongGroup {
+				if reply.Err == ErrWrongGroup || reply.Err == ErrOutdatedConfig {
 					break
+				}
+				if reply.Err == ErrNotReady {
+					time.Sleep(time.Millisecond * 100)
+					goto Recall
 				}
 				// ... not ok, or ErrWrongLeader
 			}
