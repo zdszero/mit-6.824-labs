@@ -126,6 +126,22 @@ func (ck *Clerk) Get(key string) string {
 // You will have to modify this function.
 //
 func (ck *Clerk) PutAppend(key string, value string, method OpMethod) {
+	c := make(chan bool, 1)
+	logEnable := false
+	go func() {
+		select {
+		case <-c:
+		case <-time.After(time.Second * 3):
+			DPrintf("putappend %v not finish in 3s", key)
+			logEnable = true
+		}
+	}()
+	log := func(fmt string, args ... interface{}) {
+		if logEnable {
+			DPrintf(fmt, args...)
+		}
+	}
+	defer func() { c <- true }()
 	args := PutAppendArgs{}
 	args.Method = method
 	args.Key = key
@@ -140,6 +156,7 @@ func (ck *Clerk) PutAppend(key string, value string, method OpMethod) {
 				srv := ck.make_end(servers[si])
 				var reply PutAppendReply
 			Recall:
+				log("call ...")
 				ok := srv.Call("ShardKV.PutAppend", &args, &reply)
 				if !ok {
 					continue

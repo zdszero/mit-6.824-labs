@@ -122,6 +122,8 @@ type Raft struct {
 	cond        *sync.Cond
 }
 
+func (rf *Raft) LastApplied() int { return rf.lastApplied }
+
 func (rf *Raft) GetId() int { return rf.me }
 
 func (rf *Raft) GetRaftStateSize() int {
