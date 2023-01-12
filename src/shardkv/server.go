@@ -75,21 +75,6 @@ func isSameSlice(l []int, r []int) bool {
 	return true
 }
 
-func isSamePullReply(l PullShardsReply, r PullShardsReply) bool {
-	if l.CfgNum != r.CfgNum {
-		return false
-	}
-	s1 := []int{}
-	s2 := []int{}
-	for k := range l.Shards {
-		s1 = append(s1, k)
-	}
-	for k := range r.Shards {
-		s2 = append(s2, k)
-	}
-	return isSameSlice(s1, s2)
-}
-
 func isSameCommand(l RaftLogCommand, r RaftLogCommand) bool {
 	if l.CommandType != r.CommandType {
 		return false
@@ -117,7 +102,7 @@ func isSameCommand(l RaftLogCommand, r RaftLogCommand) bool {
 	case InsertShard:
 		largs := l.Data.(PullShardsReply)
 		rargs := r.Data.(PullShardsReply)
-		return isSamePullReply(largs, rargs)
+		return largs.CfgNum == rargs.CfgNum
 	case EmptyEntry:
 		return true
 	}
@@ -550,6 +535,7 @@ func (kv *ShardKV) applier() {
 		kv.mu.Unlock()
 		if ok {
 			if !isSameCommand(ce.cmd, cmd) {
+				kv.dprintf("%d not same command", m.CommandIndex)
 				ce.replyCh <- requestResult{err: ErrWrongLeader}
 			} else {
 				ce.replyCh <- reply
@@ -563,6 +549,10 @@ func (kv *ShardKV) applier() {
 func (kv *ShardKV) applyClientRequest(op ClientOp) (reply requestResult) {
 	kv.mu.Lock()
 	defer kv.mu.Unlock()
+	if e := kv.checkShardAvailable(op.Args.GetShard()); e != OK {
+		reply.err = e
+		return
+	}
 	if kv.isOpDuplicate(op) {
 		reply.err = OK
 		return
@@ -600,7 +590,7 @@ func (kv *ShardKV) applyClientRequest(op ClientOp) (reply requestResult) {
 			log.Fatalf("shard %d not exist when append", si)
 		}
 		db.KV[args.Key] += args.Value
-		// kv.dprintf("append %v (cli %d, op %d)", args.Value, op.Args.GetClientId(), op.Args.GetOpId())
+		kv.dprintf("append %v (cli %d, op %d)", args.Value, op.Args.GetClientId(), op.Args.GetOpId())
 		// kv.dprintf("append %v:%v on shard %v", args.Key, args.Value, si)
 	}
 	reply.err = OK
@@ -1043,6 +1033,7 @@ func (kv *ShardKV) installConfig() bool {
 			}
 			e, _ := kv.commonHandler(newRaftLogCommand(InsertShard, reply))
 			if e != OK {
+				kv.dprintf("pull shards failed: %v", e)
 				return false
 			}
 		} else {
@@ -1054,6 +1045,7 @@ func (kv *ShardKV) installConfig() bool {
 		}
 		e, _ := kv.commonHandler(newRaftLogCommand(ReconfigEnd, kv.CurrCfg.Num))
 		if e != OK {
+			kv.dprintf("reconfig end failed")
 			return false
 		}
 	}

@@ -51,18 +51,6 @@ type Clerk struct {
 	opId int
 }
 
-func (ck *Clerk) buildCommonArgs(shard int, gid int) CommonArgs {
-	opId := ck.opId
-	ck.opId++
-	return CommonArgs{
-		CfgNum:   ck.config.Num,
-		Shard:    shard,
-		GID:      gid,
-		ClientId: ck.me,
-		OpId:     opId,
-	}
-}
-
 //
 // the tester calls MakeClerk.
 //
@@ -90,11 +78,16 @@ func MakeClerk(masters []*labrpc.ClientEnd, make_end func(string) *labrpc.Client
 func (ck *Clerk) Get(key string) string {
 	args := GetArgs{}
 	args.Key = key
+	args.Common.ClientId = ck.me
+	args.Common.OpId = ck.opId
+	ck.opId++
 
 	for {
 		shard := key2shard(key)
 		gid := ck.config.Shards[shard]
-		args.Common = ck.buildCommonArgs(shard, gid)
+		args.Common.GID = gid
+		args.Common.Shard = shard
+		args.Common.CfgNum = ck.config.Num
 		sleepInterval := ClientRefreshConfigInterval
 		if servers, ok := ck.config.Groups[gid]; ok {
 			// try each server for the shard.
@@ -149,6 +142,9 @@ func (ck *Clerk) PutAppend(key string, value string, method OpMethod) {
 	args.Method = method
 	args.Key = key
 	args.Value = value
+	args.Common.ClientId = ck.me
+	args.Common.OpId = ck.opId
+	ck.opId++
 
 	go func() {
 		select {
@@ -159,10 +155,13 @@ func (ck *Clerk) PutAppend(key string, value string, method OpMethod) {
 			logEnable = true
 		}
 	}()
+
 	for {
 		shard := key2shard(key)
 		gid := ck.config.Shards[shard]
-		args.Common = ck.buildCommonArgs(shard, gid)
+		args.Common.GID = gid
+		args.Common.Shard = shard
+		args.Common.CfgNum = ck.config.Num
 		sleepInterval := ClientRefreshConfigInterval
 		if servers, ok := ck.config.Groups[gid]; ok {
 			for si := 0; si < len(servers); si++ {
