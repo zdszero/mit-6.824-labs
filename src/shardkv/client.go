@@ -17,6 +17,10 @@ import (
 	"mit-6.824/shardmaster"
 )
 
+const (
+	ClientRefreshConfigInterval = 100
+)
+
 //
 // which shard is a key in?
 // please use this function,
@@ -91,7 +95,7 @@ func (ck *Clerk) Get(key string) string {
 		shard := key2shard(key)
 		gid := ck.config.Shards[shard]
 		args.Common = ck.buildCommonArgs(shard, gid)
-		args.Common = ck.buildCommonArgs(shard, gid)
+		sleepInterval := ClientRefreshConfigInterval
 		if servers, ok := ck.config.Groups[gid]; ok {
 			// try each server for the shard.
 			for si := 0; si < len(servers); si++ {
@@ -99,23 +103,30 @@ func (ck *Clerk) Get(key string) string {
 				var reply GetReply
 			Recall:
 				ok := srv.Call("ShardKV.Get", &args, &reply)
-				if !ok {
+				if !ok || reply.Err == ErrWrongLeader {
 					continue
 				}
-				if reply.Err == OK || reply.Err == ErrNoKey {
+				if reply.Err == OK {
 					return reply.Value
 				}
-				if reply.Err == ErrWrongGroup || reply.Err == ErrOutdatedConfig {
+				if reply.Err == ErrNoKey {
+					return ""
+				}
+				if reply.Err == ErrOutdatedConfig {
+					sleepInterval = 0
 					break
 				}
-				if reply.Err == ErrNotReady {
-					time.Sleep(time.Millisecond * 100)
+				if reply.Err == ErrWrongGroup {
+					break
+				}
+				if reply.Err == ErrNotReady || reply.Err == ErrInMigration {
+					time.Sleep(time.Millisecond * time.Duration(sleepInterval))
 					goto Recall
 				}
-				// ... not ok, or ErrWrongLeader
+				// ErrWrongLeader
 			}
 		}
-		time.Sleep(100 * time.Millisecond)
+		time.Sleep(time.Duration(sleepInterval) * time.Millisecond)
 		// ask master for the latest configuration.
 		ck.config = ck.sm.Query(-1)
 	}
@@ -128,14 +139,6 @@ func (ck *Clerk) Get(key string) string {
 func (ck *Clerk) PutAppend(key string, value string, method OpMethod) {
 	c := make(chan bool, 1)
 	logEnable := false
-	go func() {
-		select {
-		case <-c:
-		case <-time.After(time.Second * 3):
-			DPrintf("putappend %v not finish in 3s", key)
-			logEnable = true
-		}
-	}()
 	log := func(fmt string, args ... interface{}) {
 		if logEnable {
 			DPrintf(fmt, args...)
@@ -147,10 +150,20 @@ func (ck *Clerk) PutAppend(key string, value string, method OpMethod) {
 	args.Key = key
 	args.Value = value
 
+	go func() {
+		select {
+		case <-c:
+		case <-time.After(time.Second * 3):
+			DPrintf("putappend(cli %d, op %d) %v on shard %d not finish in 3s", 
+				args.GetClientId(), args.GetOpId(), key, key2shard(key))
+			logEnable = true
+		}
+	}()
 	for {
 		shard := key2shard(key)
 		gid := ck.config.Shards[shard]
 		args.Common = ck.buildCommonArgs(shard, gid)
+		sleepInterval := ClientRefreshConfigInterval
 		if servers, ok := ck.config.Groups[gid]; ok {
 			for si := 0; si < len(servers); si++ {
 				srv := ck.make_end(servers[si])
@@ -158,23 +171,26 @@ func (ck *Clerk) PutAppend(key string, value string, method OpMethod) {
 			Recall:
 				log("call ...")
 				ok := srv.Call("ShardKV.PutAppend", &args, &reply)
-				if !ok {
+				if !ok || reply.Err == ErrWrongLeader {
 					continue
 				}
 				if reply.Err == OK {
 					return
 				}
-				if reply.Err == ErrWrongGroup || reply.Err == ErrOutdatedConfig {
+				if reply.Err == ErrWrongGroup {
 					break
 				}
-				if reply.Err == ErrNotReady {
-					time.Sleep(time.Millisecond * 100)
+				if reply.Err == ErrOutdatedConfig {
+					sleepInterval = 0
+					break
+				}
+				if reply.Err == ErrNotReady || reply.Err == ErrInMigration {
+					time.Sleep(time.Millisecond * time.Duration(sleepInterval))
 					goto Recall
 				}
-				// ... not ok, or ErrWrongLeader
 			}
 		}
-		time.Sleep(100 * time.Millisecond)
+		time.Sleep(time.Millisecond * time.Duration(sleepInterval))
 		// ask master for the latest configuration.
 		ck.config = ck.sm.Query(-1)
 	}

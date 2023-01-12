@@ -62,18 +62,66 @@ type RaftLogCommand struct {
 	Data interface{}
 }
 
+func isSameSlice(l []int, r []int) bool {
+	if len(l) != len(r) {
+		return false
+	}
+	length := len(l)
+	for i := 0; i < length; i++ {
+		if l[i] != r[i] {
+			return false
+		}
+	}
+	return true
+}
+
+func isSamePullReply(l PullShardsReply, r PullShardsReply) bool {
+	if l.CfgNum != r.CfgNum {
+		return false
+	}
+	s1 := []int{}
+	s2 := []int{}
+	for k := range l.Shards {
+		s1 = append(s1, k)
+	}
+	for k := range r.Shards {
+		s2 = append(s2, k)
+	}
+	return isSameSlice(s1, s2)
+}
+
 func isSameCommand(l RaftLogCommand, r RaftLogCommand) bool {
 	if l.CommandType != r.CommandType {
 		return false
 	}
 	cmdtype := l.CommandType
-	if cmdtype == ClientRequest {
+	switch cmdtype {
+	case ClientRequest:
 		largs := l.Data.(ClientOp)
 		rargs := r.Data.(ClientOp)
 		return largs.Args.GetClientId() == rargs.Args.GetClientId() &&
 			largs.Args.GetOpId() == rargs.Args.GetOpId()
+	case ReconfigStart:
+		largs := l.Data.(shardmaster.Config)
+		rargs := r.Data.(shardmaster.Config)
+		return largs.Num == rargs.Num
+	case ReconfigEnd:
+		largs := l.Data.(int)
+		rargs := r.Data.(int)
+		return largs == rargs
+	case RemoveShard:
+		largs := l.Data.(RemoveShardsArgs)
+		rargs := r.Data.(RemoveShardsArgs)
+		return largs.CfgNum == rargs.CfgNum &&
+			isSameSlice(largs.ShardNums, rargs.ShardNums)
+	case InsertShard:
+		largs := l.Data.(PullShardsReply)
+		rargs := r.Data.(PullShardsReply)
+		return isSamePullReply(largs, rargs)
+	case EmptyEntry:
+		return true
 	}
-	return true
+	return false
 }
 
 func newRaftLogCommand(cmdtype CommandType, data interface{}) RaftLogCommand {
@@ -306,7 +354,11 @@ func (kv *ShardKV) checkShardAvailable(si int) Err {
 	if kv.CurrCfg.Shards[si] != kv.gid {
 		return ErrWrongGroup
 	}
-	if shard, ok := kv.Shards[si]; ok && shard.Status != Serving {
+	shard, ok := kv.Shards[si]
+	if !ok {
+		return ErrInMigration
+	}
+	if shard.Status != Serving {
 		return ErrInMigration
 	}
 	return OK
@@ -441,6 +493,14 @@ func (kv *ShardKV) setShardRefTbl(op ClientOp) {
 }
 
 func (kv *ShardKV) applier() {
+	defer func() {
+		kv.mu.Lock()
+		// close all pending RPC handler reply channel to avoid goroutine resource leak
+		for _, ce := range kv.commandTbl {
+			close(ce.replyCh)
+		}
+		kv.mu.Unlock()
+	}()
 	for m := range kv.applyCh {
 		if m.SnapshotValid {
 			kv.mu.Lock()
@@ -462,9 +522,6 @@ func (kv *ShardKV) applier() {
 		switch cmd.CommandType {
 		case ClientRequest:
 			op := cmd.Data.(ClientOp)
-			if kv.isOpDuplicate(op) {
-				break
-			}
 			reply = kv.applyClientRequest(op)
 		case ReconfigStart:
 			cfg := cmd.Data.(shardmaster.Config)
@@ -483,10 +540,12 @@ func (kv *ShardKV) applier() {
 			break
 		}
 		// kv.dprintf("apply %d end", m.CommandIndex)
+		kv.mu.Lock()
 		ce, ok := kv.commandTbl[m.CommandIndex]
 		if ok {
 			delete(kv.commandTbl, m.CommandIndex)
 		}
+		kv.mu.Unlock()
 		if ok {
 			if !isSameCommand(ce.cmd, cmd) {
 				ce.replyCh <- requestResult{err: ErrWrongLeader}
@@ -500,6 +559,12 @@ func (kv *ShardKV) applier() {
 }
 
 func (kv *ShardKV) applyClientRequest(op ClientOp) (reply requestResult) {
+	kv.mu.Lock()
+	defer kv.mu.Unlock()
+	if kv.isOpDuplicate(op) {
+		reply.err = OK
+		return
+	}
 	si := op.Args.GetShard()
 	kv.setShardRefTbl(op)
 	switch {
@@ -532,12 +597,8 @@ func (kv *ShardKV) applyClientRequest(op ClientOp) (reply requestResult) {
 		if !ok {
 			log.Fatalf("shard %d not exist when append", si)
 		}
-		value, ok := db.KV[args.Key]
-		if ok {
-			db.KV[args.Key] = value + args.Value
-		} else {
-			db.KV[args.Key] = args.Value
-		}
+		db.KV[args.Key] += args.Value
+		// kv.dprintf("append %v (cli %d, op %d)", args.Value, op.Args.GetClientId(), op.Args.GetOpId())
 		// kv.dprintf("append %v:%v on shard %v", args.Key, args.Value, si)
 	}
 	reply.err = OK
@@ -545,6 +606,8 @@ func (kv *ShardKV) applyClientRequest(op ClientOp) (reply requestResult) {
 }
 
 func (kv *ShardKV) applyConfigStart(cfg shardmaster.Config) {
+	kv.mu.Lock()
+	defer kv.mu.Unlock()
 	kv.dprintf("-> config %d start", cfg.Num)
 	if cfg.Num <= kv.CurrCfg.Num {
 		return
@@ -555,15 +618,13 @@ func (kv *ShardKV) applyConfigStart(cfg shardmaster.Config) {
 	// save previous config
 	kv.PrevCfg = kv.CurrCfg
 	kv.CurrCfg = cfg
-	prevCfg := kv.PrevCfg
-	newCfg := kv.CurrCfg
 	// config num == 0 means no config
-	oldshards := prevCfg.CollectShards(kv.gid)
-	newshards := newCfg.CollectShards(kv.gid)
+	oldshards := kv.PrevCfg.CollectShards(kv.gid)
+	newshards := kv.CurrCfg.CollectShards(kv.gid)
 	// remove group to who
-	removed, removeGroup := getDiffShards(newshards, oldshards, newCfg.Shards[:])
+	removed, removeGroup := getDiffShards(newshards, oldshards, kv.CurrCfg.Shards[:])
 	// to pull the new group from who
-	inserted, insertGroup := getDiffShards(oldshards, newshards, prevCfg.Shards[:])
+	inserted, insertGroup := getDiffShards(oldshards, newshards, kv.PrevCfg.Shards[:])
 	// start pulling and sending at the same time
 	if len(removeGroup) > 0 && len(insertGroup) > 0 {
 		panic("Error: both transfer and accept shards in one config change")
@@ -588,7 +649,7 @@ func (kv *ShardKV) applyConfigStart(cfg shardmaster.Config) {
 				log.Fatalf("server(%d-%d) removing shards when shard is empty", kv.gid, kv.rf.GetId())
 			}
 		}
-		kv.waitPullTbl[newCfg.Num] = make(chan bool, 1)
+		kv.waitPullTbl[kv.CurrCfg.Num] = make(chan bool, 1)
 	}
 	kv.RemovedShardNums = removed
 	kv.InsertShardNums = inserted
@@ -597,6 +658,8 @@ func (kv *ShardKV) applyConfigStart(cfg shardmaster.Config) {
 }
 
 func (kv *ShardKV) applyConfigEnd(cfgNum int) {
+	kv.mu.Lock()
+	defer kv.mu.Unlock()
 	kv.dprintf("* apply config end")
 	kv.PrevCfg = kv.CurrCfg
 	if kv.CurrCfg.Num != cfgNum {
@@ -627,6 +690,8 @@ func (kv *ShardKV) applyConfigEnd(cfgNum int) {
 }
 
 func (kv *ShardKV) isAllRemoved() bool {
+	kv.mu.Lock()
+	defer kv.mu.Unlock()
 	allRemoved := true
 	for _, si := range kv.RemovedShardNums {
 		if shard, ok := kv.Shards[si]; !ok || shard.Status != Erased {
@@ -638,6 +703,8 @@ func (kv *ShardKV) isAllRemoved() bool {
 }
 
 func (kv *ShardKV) applyRemoveShards(args RemoveShardsArgs) {
+	kv.mu.Lock()
+	defer kv.mu.Unlock()
 	for _, si := range args.ShardNums {
 		if shard, ok := kv.Shards[si]; ok {
 			shard.Status = Erased
@@ -652,6 +719,8 @@ func (kv *ShardKV) applyRemoveShards(args RemoveShardsArgs) {
 }
 
 func (kv *ShardKV) applyInsertShards(reply PullShardsReply) {
+	kv.mu.Lock()
+	defer kv.mu.Unlock()
 	sis := []int{}
 	for si, shard := range reply.Shards {
 		shard.Status = Pulled
@@ -671,6 +740,7 @@ type PullShardsArgs struct {
 
 type PullShardsReply struct {
 	Err         Err
+	CfgNum      int
 	Shards      map[int]Shard
 	ShardRefTbl map[int]ClientTbl
 }
@@ -688,12 +758,15 @@ func (kv *ShardKV) PullShards(args *PullShardsArgs, reply *PullShardsReply) {
 		reply.Err = ErrWrongLeader
 		return
 	}
-	if args.CfgNum < kv.CurrCfg.Num {
+	kv.mu.Lock()
+	currCfgNum := kv.CurrCfg.Num
+	kv.mu.Unlock()
+	if args.CfgNum < currCfgNum {
 		kv.dprintf("duplicate pull")
 		reply.Err = ErrDuplicate
 		return
 	}
-	if args.CfgNum > kv.CurrCfg.Num {
+	if args.CfgNum > currCfgNum {
 		kv.dprintf("not ready")
 		reply.Err = ErrNotReady
 		return
@@ -711,11 +784,14 @@ func (kv *ShardKV) PullShards(args *PullShardsArgs, reply *PullShardsReply) {
 	}
 	replyShards := make(map[int]Shard)
 	shardRefTbl := make(map[int]ClientTbl)
+	kv.mu.Lock()
 	for _, si := range args.ShardNums {
 		replyShards[si] = copyShard(kv.Shards[si])
 		shardRefTbl[si] = copyRefTbl(kv.ShardRefTbl[si])
 	}
+	kv.mu.Unlock()
 	reply.Err = OK
+	reply.CfgNum = currCfgNum
 	reply.Shards = replyShards
 	reply.ShardRefTbl = shardRefTbl
 }
@@ -773,7 +849,6 @@ func (kv *ShardKV) pullShards(groupShards map[int][]int) bool {
 						continue
 					}
 					if reply.Err == OK {
-						kv.dprintf("start insert %v", shardNums)
 						e, _ := kv.commonHandler(newRaftLogCommand(InsertShard, reply))
 						if e != OK {
 							success = false
@@ -811,7 +886,9 @@ func (kv *ShardKV) RemoveShards(args *RemoveShardsArgs, reply *RemoveShardsReply
 		reply.Err = ErrWrongLeader
 		return
 	}
+	kv.mu.Lock()
 	currCfgNum := kv.CurrCfg.Num
+	kv.mu.Unlock()
 	if args.CfgNum < currCfgNum {
 		kv.dprintf("duplicate(remove)")
 		reply.Err = ErrDuplicate
@@ -918,18 +995,22 @@ func isNullGroup(grp map[int][]int) bool {
 
 // apply new config
 func (kv *ShardKV) installConfig() bool {
-	if len(kv.RemoveGroup) == 0 && len(kv.InsertGroup) == 0 {
+	kv.mu.Lock()
+	removeGrp := kv.RemoveGroup
+	insertGrp := kv.InsertGroup
+	kv.mu.Unlock()
+	if len(removeGrp) == 0 && len(insertGrp) == 0 {
 		e, _ := kv.commonHandler(newRaftLogCommand(ReconfigEnd, kv.CurrCfg.Num))
 		if e != OK {
 			return false
 		}
 	}
-	if len(kv.RemoveGroup) > 0 {
-		if isNullGroup(kv.RemoveGroup) {
+	if len(removeGrp) > 0 {
+		if isNullGroup(removeGrp) {
 			// no machine will pull the shards
 			args := RemoveShardsArgs{
 				CfgNum:    kv.CurrCfg.Num,
-				ShardNums: kv.RemoveGroup[0],
+				ShardNums: removeGrp[0],
 			}
 			e, _ := kv.commonHandler(newRaftLogCommand(RemoveShard, args))
 			if e != OK {
@@ -937,7 +1018,7 @@ func (kv *ShardKV) installConfig() bool {
 			}
 		} else {
 			for !kv.isAllRemoved() {
-				// kv.dprintf("wait for %v on %d ...", kv.RemoveGroup, kv.CurrCfg.Num)
+				// kv.dprintf("wait for %v on %d ...", removeGrp, kv.CurrCfg.Num)
 				// <-kv.waitPullTbl[kv.CurrCfg.Num]
 				// kv.dprintf("wait finished")
 				time.Sleep(time.Millisecond * 50)
@@ -948,10 +1029,10 @@ func (kv *ShardKV) installConfig() bool {
 			return false
 		}
 	}
-	if len(kv.InsertGroup) > 0 {
-		if isNullGroup(kv.InsertGroup) {
+	if len(insertGrp) > 0 {
+		if isNullGroup(insertGrp) {
 			shards := make(map[int]Shard)
-			for _, si := range kv.InsertGroup[0] {
+			for _, si := range insertGrp[0] {
 				shards[si] = newShard(Pulled)
 			}
 			reply := PullShardsReply{
@@ -963,11 +1044,11 @@ func (kv *ShardKV) installConfig() bool {
 				return false
 			}
 		} else {
-			success := kv.pullShards(kv.InsertGroup)
+			success := kv.pullShards(insertGrp)
 			if !success {
 				return false
 			}
-			kv.removeShards(kv.InsertGroup)
+			kv.removeShards(insertGrp)
 		}
 		e, _ := kv.commonHandler(newRaftLogCommand(ReconfigEnd, kv.CurrCfg.Num))
 		if e != OK {
