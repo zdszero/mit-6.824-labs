@@ -154,8 +154,8 @@ func (ck *Clerk) PutAppend(key string, value string, method OpMethod) {
 		select {
 		case <-c:
 		case <-time.After(time.Second * 3):
-			DPrintf("putappend(cli %d, op %d) %v on shard %d not finish in 3s", 
-				args.GetClientId(), args.GetOpId(), key, key2shard(key))
+			DPrintf("putappend(cli %d, op %d, cfg %d) on shard %d on group %d not finish in 3s", 
+				args.GetClientId(), args.GetOpId(), args.GetCfgNum(), args.GetShard(), args.GetGid())
 			logEnable = true
 		}
 	}()

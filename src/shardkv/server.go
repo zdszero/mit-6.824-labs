@@ -349,8 +349,6 @@ func (kv *ShardKV) readSnapshot(data []byte) {
 ///////////////////////////////
 
 func (kv *ShardKV) checkShardAvailable(si int) Err {
-	kv.mu.Lock()
-	defer kv.mu.Unlock()
 	if kv.CurrCfg.Shards[si] != kv.gid {
 		return ErrWrongGroup
 	}
@@ -378,29 +376,33 @@ func (kv *ShardKV) commonHandler(cmd RaftLogCommand) (e Err, r interface{}) {
 		e = ErrWrongLeader
 		return
 	}
+	// lock bofore rf.Start()
+	// to avoid raft finish to quickly and apply before kv.commandTbl has set applyCh
 	kv.mu.Lock()
-	curCfgNum := kv.CurrCfg.Num
-	kv.mu.Unlock()
 	switch cmd.CommandType {
 	case ClientRequest:
 		cliOp := cmd.Data.(ClientOp)
-		if cliOp.Args.GetCfgNum() > curCfgNum {
-			kv.triggerConfigPoll()
+		if cliOp.Args.GetCfgNum() > kv.CurrCfg.Num {
 			// kv.dprintf("not ready, cli %d my %d", cliOp.Args.GetCfgNum(), curCfgNum)
+			kv.mu.Unlock()
+			kv.triggerConfigPoll()
 			e = ErrNotReady
 			return
 		}
-		if cliOp.Args.GetCfgNum() < curCfgNum {
+		if cliOp.Args.GetCfgNum() < kv.CurrCfg.Num {
 			// kv.dprintf("outdated config")
+			kv.mu.Unlock()
 			e = ErrOutdatedConfig
 			return
 		}
-		if curCfgNum == 0 {
+		if kv.CurrCfg.Num == 0 {
+			kv.mu.Unlock()
 			e = ErrWrongGroup
 			return
 		}
 		if err := kv.checkShardAvailable(cliOp.Args.GetShard()); err != OK {
 			// kv.dprintf("not available")
+			kv.mu.Unlock()
 			e = err
 			return
 		}
@@ -408,16 +410,16 @@ func (kv *ShardKV) commonHandler(cmd RaftLogCommand) (e Err, r interface{}) {
 
 	index, term, isLeader := kv.rf.Start(cmd)
 	if term == 0 {
+		kv.mu.Unlock()
 		e = ErrInitElection
 		return
 	}
 	if !isLeader {
+		kv.mu.Unlock()
 		e = ErrWrongLeader
 		return
 	}
-
 	c := make(chan requestResult)
-	kv.mu.Lock()
 	kv.commandTbl[index] = commandEntry{cmd: cmd, replyCh: c}
 	kv.mu.Unlock()
 
