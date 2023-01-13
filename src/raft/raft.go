@@ -213,8 +213,6 @@ func (rf *Raft) getLogAfter(index int) []LogEntry {
 // believes it is the leader.
 func (rf *Raft) GetState() (int, bool) {
 	// Your code here (2A).
-	rf.mu.Lock()
-	defer rf.mu.Unlock()
 	return rf.CurrentTerm, rf.state == Leader
 }
 

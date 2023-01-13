@@ -77,25 +77,6 @@ func check_same_config(t *testing.T, c1 Config, c2 Config) {
 	}
 }
 
-func TestMy(t *testing.T) {
-	const nservers = 3
-	cfg := make_config(t, nservers, false)
-
-	ck := cfg.makeClient(cfg.All())
-	// fmt.Println(ck.Query(-1))
-	ck.Join(map[int][]string{1: []string{"x", "y", "z"}})
-	// fmt.Println(ck.Query(-1))
-	ck.Join(map[int][]string{2: []string{"x", "y", "z"}})
-	ck.Join(map[int][]string{3: []string{"x", "y"}, 4: []string{"a", "b"}})
-	ck.Join(map[int][]string{5: []string{"e", "f"}})
-	// fmt.Println(ck.Query(-1))
-	ck.Leave([]int{3})
-	ck.Leave([]int{4, 5})
-	ck.Leave([]int{1})
-	// fmt.Println(ck.Query(-1))
-	ck.Leave([]int{2})
-}
-
 func TestBasic(t *testing.T) {
 	const nservers = 3
 	cfg := make_config(t, nservers, false)

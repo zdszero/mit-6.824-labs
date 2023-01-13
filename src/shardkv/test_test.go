@@ -297,6 +297,58 @@ func TestMissChange(t *testing.T) {
 	fmt.Printf("  ... Passed\n")
 }
 
+func TestMy(t *testing.T) {
+	cfg := make_config(t, 3, false, 100)
+	defer cfg.cleanup()
+
+	var done int32
+	ck := cfg.makeClient()
+	ch := make(chan bool)
+
+	n := 10
+	ka := make([]string, n)
+	va := make([]string, n)
+
+	cfg.join(0)
+
+	for i := 0; i < n; i++ {
+		ka[i] = strconv.Itoa(i) // ensure multiple shards
+		va[i] = randstring(5)
+		ck.Put(ka[i], va[i])
+	}
+
+	ff := func(i int) {
+		defer func() {
+			ch <- true
+			DPrintf("%d finished", i)
+		}()
+		ck1 := cfg.makeClient()
+		for atomic.LoadInt32(&done) == 0 {
+			x := randstring(5)
+			ck1.Append(ka[i], x)
+			va[i] += x
+			time.Sleep(10 * time.Millisecond)
+		}
+	}
+
+	for i := 0; i < n; i++ {
+		go ff(i)
+	}
+
+	time.Sleep(time.Millisecond * 5000)
+
+
+	atomic.StoreInt32(&done, 1)
+	DPrintf("all done")
+
+	for i := 0; i < n; i++ {
+		<-ch
+	}
+	for i := 0; i < n; i++ {
+		check(t, ck, ka[i], va[i])
+	}
+}
+
 func TestConcurrent1(t *testing.T) {
 	fmt.Printf("Test: concurrent puts and configuration changes...\n")
 

@@ -361,6 +361,7 @@ func (kv *ShardKV) commonHandler(cmd RaftLogCommand) (e Err, r interface{}) {
 		e = ErrWrongLeader
 		return
 	}
+
 	// lock bofore rf.Start()
 	// to avoid raft finish to quickly and apply before kv.commandTbl has set applyCh
 	kv.mu.Lock()
@@ -368,7 +369,7 @@ func (kv *ShardKV) commonHandler(cmd RaftLogCommand) (e Err, r interface{}) {
 	case ClientRequest:
 		cliOp := cmd.Data.(ClientOp)
 		if cliOp.Args.GetCfgNum() > kv.CurrCfg.Num {
-			// kv.dprintf("not ready, cli %d my %d", cliOp.Args.GetCfgNum(), curCfgNum)
+			kv.dprintf("not ready, cli %d my %d", cliOp.Args.GetCfgNum(), kv.CurrCfg.Num)
 			kv.mu.Unlock()
 			kv.triggerConfigPoll()
 			e = ErrNotReady
@@ -404,8 +405,19 @@ func (kv *ShardKV) commonHandler(cmd RaftLogCommand) (e Err, r interface{}) {
 		e = ErrWrongLeader
 		return
 	}
+
 	c := make(chan requestResult)
 	kv.commandTbl[index] = commandEntry{cmd: cmd, replyCh: c}
+	// if cmd.CommandType == ClientRequest {
+	// 	kv.dprintf("start (cli %v, op %v) on %d", cmd.Data.(ClientOp).Args.GetClientId(),
+	// 		cmd.Data.(ClientOp).Args.GetOpId(), index)
+	// }
+	// defer func() {
+	// 	if cmd.CommandType == ClientRequest {
+	// 		kv.dprintf("start (cli %v, op %v) on %d END e = %v", cmd.Data.(ClientOp).Args.GetClientId(),
+	// 		cmd.Data.(ClientOp).Args.GetOpId(), index, e)
+	// 	}
+	// }()
 	kv.mu.Unlock()
 
 CheckTermAndWaitReply:
@@ -590,7 +602,7 @@ func (kv *ShardKV) applyClientRequest(op ClientOp) (reply requestResult) {
 			log.Fatalf("shard %d not exist when append", si)
 		}
 		db.KV[args.Key] += args.Value
-		kv.dprintf("append %v (cli %d, op %d)", args.Value, op.Args.GetClientId(), op.Args.GetOpId())
+		// kv.dprintf("append %v (cli %d, op %d)", args.Value, op.Args.GetClientId(), op.Args.GetOpId())
 		// kv.dprintf("append %v:%v on shard %v", args.Key, args.Value, si)
 	}
 	reply.err = OK
@@ -913,7 +925,7 @@ func (kv *ShardKV) RemoveShards(args *RemoveShardsArgs, reply *RemoveShardsReply
 }
 
 func (kv *ShardKV) removeShards(groupShards map[int][]int) {
-	kv.dprintf("remove shards ...")
+	kv.dprintf("remove shards %v ...", groupShards)
 	wg := sync.WaitGroup{}
 	for g, sis := range groupShards {
 		wg.Add(1)
