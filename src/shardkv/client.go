@@ -10,6 +10,7 @@ package shardkv
 
 import (
 	"crypto/rand"
+	"log"
 	"math/big"
 	"time"
 
@@ -47,8 +48,9 @@ type Clerk struct {
 	config   shardmaster.Config
 	make_end func(string) *labrpc.ClientEnd
 	// You will have to modify this struct.
-	me   int64
-	opId int
+	me          int64
+	opId        int
+	groupLeader map[int]int
 }
 
 //
@@ -66,6 +68,7 @@ func MakeClerk(masters []*labrpc.ClientEnd, make_end func(string) *labrpc.Client
 	ck.make_end = make_end
 	ck.me = nrand()
 	ck.opId = 1
+	ck.groupLeader = make(map[int]int)
 	return ck
 }
 
@@ -82,28 +85,29 @@ func (ck *Clerk) Get(key string) string {
 	args.Common.OpId = ck.opId
 	ck.opId++
 
+	shard := key2shard(key)
+	args.Common.Shard = shard
 	for {
-		shard := key2shard(key)
 		gid := ck.config.Shards[shard]
 		args.Common.GID = gid
-		args.Common.Shard = shard
 		args.Common.CfgNum = ck.config.Num
 		sleepInterval := ClientRefreshConfigInterval
+		serverId := ck.groupLeader[gid]
 		if servers, ok := ck.config.Groups[gid]; ok {
 			// try each server for the shard.
-			for si := 0; si < len(servers); si++ {
-				srv := ck.make_end(servers[si])
+			for i, nServers := 0, len(servers); i < nServers;	{
+				srv := ck.make_end(servers[serverId])
 				var reply GetReply
-			Recall:
 				ok := srv.Call("ShardKV.Get", &args, &reply)
-				if !ok || reply.Err == ErrWrongLeader {
+				if !ok || reply.Err == ErrWrongLeader || reply.Err == ErrShutdown {
+					serverId = (serverId + 1) % nServers
+					i++
 					continue
 				}
-				if reply.Err == OK {
-					return reply.Value
-				}
-				if reply.Err == ErrNoKey {
-					return ""
+				ck.groupLeader[gid] = serverId
+				if reply.Err == ErrNotReady || reply.Err == ErrInMigration || reply.Err == ErrInitElection {
+					time.Sleep(time.Millisecond * time.Duration(sleepInterval))
+					continue
 				}
 				if reply.Err == ErrOutdatedConfig {
 					sleepInterval = 0
@@ -112,11 +116,13 @@ func (ck *Clerk) Get(key string) string {
 				if reply.Err == ErrWrongGroup {
 					break
 				}
-				if reply.Err == ErrNotReady || reply.Err == ErrInMigration {
-					time.Sleep(time.Millisecond * time.Duration(sleepInterval))
-					goto Recall
+				if reply.Err == ErrNoKey {
+					return ""
 				}
-				// ErrWrongLeader
+				if reply.Err == OK {
+					return reply.Value
+				}
+				log.Fatalf("Unknown reply.Err: %v", reply.Err)
 			}
 		}
 		time.Sleep(time.Duration(sleepInterval) * time.Millisecond)
@@ -130,14 +136,6 @@ func (ck *Clerk) Get(key string) string {
 // You will have to modify this function.
 //
 func (ck *Clerk) PutAppend(key string, value string, method OpMethod) {
-	c := make(chan bool, 1)
-	logEnable := false
-	log := func(fmt string, args ... interface{}) {
-		if logEnable {
-			DPrintf(fmt, args...)
-		}
-	}
-	defer func() { c <- true }()
 	args := PutAppendArgs{}
 	args.Method = method
 	args.Key = key
@@ -146,35 +144,28 @@ func (ck *Clerk) PutAppend(key string, value string, method OpMethod) {
 	args.Common.OpId = ck.opId
 	ck.opId++
 
-	go func() {
-		select {
-		case <-c:
-		case <-time.After(time.Second * 3):
-			DPrintf("putappend(cli %d, op %d, cfg %d) on shard %d on group %d not finish in 3s", 
-				args.GetClientId(), args.GetOpId(), args.GetCfgNum(), args.GetShard(), args.GetGid())
-			logEnable = true
-		}
-	}()
-
+	shard := key2shard(key)
+	args.Common.Shard = shard
 	for {
-		shard := key2shard(key)
 		gid := ck.config.Shards[shard]
 		args.Common.GID = gid
-		args.Common.Shard = shard
 		args.Common.CfgNum = ck.config.Num
 		sleepInterval := ClientRefreshConfigInterval
+		serverId := ck.groupLeader[gid]
 		if servers, ok := ck.config.Groups[gid]; ok {
-			for si := 0; si < len(servers); si++ {
-				srv := ck.make_end(servers[si])
+			for i, nServers := 0, len(servers); i < nServers;	{
+				srv := ck.make_end(servers[serverId])
 				var reply PutAppendReply
-			Recall:
-				log("call ...")
 				ok := srv.Call("ShardKV.PutAppend", &args, &reply)
-				if !ok || reply.Err == ErrWrongLeader {
+				if !ok || reply.Err == ErrWrongLeader || reply.Err == ErrShutdown {
+					serverId = (serverId + 1) % nServers
+					i++
 					continue
 				}
-				if reply.Err == OK {
-					return
+				ck.groupLeader[gid] = serverId
+				if reply.Err == ErrNotReady || reply.Err == ErrInMigration || reply.Err == ErrInitElection {
+					time.Sleep(time.Millisecond * time.Duration(sleepInterval))
+					continue
 				}
 				if reply.Err == ErrWrongGroup {
 					break
@@ -183,10 +174,10 @@ func (ck *Clerk) PutAppend(key string, value string, method OpMethod) {
 					sleepInterval = 0
 					break
 				}
-				if reply.Err == ErrNotReady || reply.Err == ErrInMigration {
-					time.Sleep(time.Millisecond * time.Duration(sleepInterval))
-					goto Recall
+				if reply.Err == OK {
+					return
 				}
+				log.Fatalf("Unknown reply.Err: %v", reply.Err)
 			}
 		}
 		time.Sleep(time.Millisecond * time.Duration(sleepInterval))
