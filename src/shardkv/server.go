@@ -806,6 +806,8 @@ func (kv *ShardKV) checkStatus(sis []int, status ShardStatus) bool {
 	var s ShardStatus
 	if shard, ok := kv.Shards[sis[0]]; ok {
 		s = shard.Status
+	} else {
+		s = Erased
 	}
 	for i := 1; i < len(sis); i++ {
 		if shard, ok := kv.Shards[sis[i]]; ok {

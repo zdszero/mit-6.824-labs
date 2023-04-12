@@ -239,7 +239,7 @@ func (sm *ShardMaster) applier() {
 		}
 		op := m.Command.(Op)
 		lastOpResult, ok := sm.clientTbl[op.ClientId]
-		if ok && op.OpId < lastOpResult.OpId {
+		if ok && op.OpId <= lastOpResult.OpId {
 			r = lastOpResult.Result
 		} else {
 			switch op.Method {
@@ -252,9 +252,10 @@ func (sm *ShardMaster) applier() {
 					joinGids = append(joinGids, k)
 					newCfg.Groups[k] = v
 				}
+				// sm.dprintf("join %v (cli: %v, op: %v)", joinGids, op.ClientId, op.OpId)
 				newCfg.rebalance(&lastCfg, joinGids, nil)
 				sm.configs = append(sm.configs, newCfg)
-				// sm.dprintf("shards = %v", newCfg.Shards)
+				// sm.dprintf("shards[%d] = %v", newCfg.Num, newCfg.Shards)
 				r = Config{Num: -1}
 			case Leave:
 				leaveArg := op.Args.(LeaveArgs)
@@ -265,9 +266,10 @@ func (sm *ShardMaster) applier() {
 					leaveGids = append(leaveGids, gid)
 					delete(newCfg.Groups, gid)
 				}
+				// sm.dprintf("leave %v (cli: %v, op: %v)", leaveGids, op.ClientId, op.OpId)
 				newCfg.rebalance(&lastCfg, nil, leaveGids)
 				sm.configs = append(sm.configs, newCfg)
-				// sm.dprintf("shards = %v", newCfg.Shards)
+				// sm.dprintf("shards[%d] = %v", newCfg.Num, newCfg.Shards)
 				r = Config{Num: -1}
 			case Move:
 				moveArg := op.Args.(MoveArgs)
