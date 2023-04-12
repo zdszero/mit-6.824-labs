@@ -18,7 +18,7 @@ import (
 // system setting
 //
 const (
-	SnapshotThresholdRatio = 0.9
+	SnapshotThresholdRatio = 0.8
 	ConsensusTimeout       = 500
 	WaitPullTimeout        = 500
 	PollConfigInterval     = 100
@@ -766,7 +766,7 @@ func (kv *ShardKV) PullShards(args *PullShardsArgs, reply *PullShardsReply) {
 	currCfgNum := kv.CurrCfg.Num
 	kv.mu.Unlock()
 	if args.CfgNum < currCfgNum {
-		kv.dprintf("duplicate pull")
+		kv.dprintf("duplicate pull (from previous pulling)")
 		reply.Err = ErrDuplicate
 		return
 	}
@@ -926,9 +926,11 @@ func (kv *ShardKV) RemoveShards(args *RemoveShardsArgs, reply *RemoveShardsReply
 	reply.Err = OK
 }
 
-func (kv *ShardKV) removeShards(groupShards map[int][]int) {
+func (kv *ShardKV) removeShards(groupShards map[int][]int) bool {
 	kv.dprintf("remove shards %v ...", groupShards)
 	wg := sync.WaitGroup{}
+	var successCount int32
+	successCount = 0
 	for g, sis := range groupShards {
 		wg.Add(1)
 		kv.mu.Lock()
@@ -952,6 +954,7 @@ func (kv *ShardKV) removeShards(groupShards map[int][]int) {
 						continue
 					}
 					if reply.Err == OK || reply.Err == ErrDuplicate {
+						atomic.AddInt32(&successCount, 1)
 						return
 					}
 					if reply.Err == ErrNotReady {
@@ -966,6 +969,7 @@ func (kv *ShardKV) removeShards(groupShards map[int][]int) {
 		}(servers, sis, cfgNum)
 	}
 	wg.Wait()
+	return int(successCount) == len(groupShards)
 }
 
 // find the shards that in ss2 but not in ss1
@@ -1055,7 +1059,10 @@ func (kv *ShardKV) installConfig() bool {
 			if !success {
 				return false
 			}
-			kv.removeShards(insertGrp)
+			success = kv.removeShards(insertGrp)
+			if !success {
+				return false
+			}
 		}
 		e, _ := kv.commonHandler(newRaftLogCommand(ReconfigEnd, kv.CurrCfg.Num))
 		if e != OK {
@@ -1073,11 +1080,17 @@ func (kv *ShardKV) triggerConfigPoll() {
 	}
 }
 
-func (kv *ShardKV) reconfig() {
-	// apply log entries to latest point
+func (kv *ShardKV) reconfig() bool {
+	// when restarting, use empty entry to make server to recover to latest state
+	// WHY?
+	// the server might be in intermidiate state. e.g. the ConfigEnd has been committed but not applied
 	e, _ := kv.commonHandler(newRaftLogCommand(EmptyEntry, 0))
 	if e != OK {
-		return
+		return false
+	}
+	// the server might shutdown
+	if kv.configDone() {
+		return true
 	}
 	kv.dprintf("reconfig %d ...", kv.CurrCfg.Num)
 	success := kv.installConfig()
@@ -1086,6 +1099,18 @@ func (kv *ShardKV) reconfig() {
 	} else {
 		kv.dprintf("reconfig %d failed ...", kv.CurrCfg.Num)
 	}
+	return success
+}
+
+func (kv *ShardKV) configDone() bool {
+	kv.mu.Lock()
+	defer kv.mu.Unlock()
+	return kv.CurrCfg.Num == kv.PrevCfg.Num
+}
+
+func (kv *ShardKV) isLeader() bool {
+	_, isLeader := kv.rf.GetState()
+	return isLeader
 }
 
 func (kv *ShardKV) configPoller() {
@@ -1100,22 +1125,24 @@ func (kv *ShardKV) configPoller() {
 				return
 			}
 		}
-		if _, isLeader := kv.rf.GetState(); !isLeader {
+		// complete unfinished config process
+		for kv.isLeader() && !kv.configDone() {
+			if kv.killed() {
+				return
+			}
+			kv.reconfig()
+		}
+		if !kv.isLeader() {
 			continue
 		}
 		kv.mu.Lock()
-		// reconfig unfinished
-		if kv.CurrCfg.Num != kv.PrevCfg.Num {
-			kv.mu.Unlock()
-			kv.reconfig()
-			continue
-		}
 		nextCfgNum := kv.CurrCfg.Num + 1
 		kv.mu.Unlock()
 		cfg := kv.mck.Query(nextCfgNum)
 		if cfg.Num == 0 {
 			continue
 		}
+		// the sharkv already holds the lastest config
 		if cfg.Num != nextCfgNum {
 			continue
 		}
@@ -1123,7 +1150,6 @@ func (kv *ShardKV) configPoller() {
 		if e != OK {
 			continue
 		}
-		kv.reconfig()
 	}
 }
 

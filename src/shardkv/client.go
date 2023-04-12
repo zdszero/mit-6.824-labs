@@ -19,7 +19,7 @@ import (
 )
 
 const (
-	ClientRefreshConfigInterval = 100
+	ClientRefreshConfigInterval = 300
 )
 
 //
