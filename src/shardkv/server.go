@@ -338,10 +338,7 @@ func (kv *ShardKV) checkShardAvailable(si int) Err {
 		return ErrWrongGroup
 	}
 	shard, ok := kv.Shards[si]
-	if !ok {
-		return ErrInMigration
-	}
-	if shard.Status != Serving {
+	if !ok || shard.Status == Pulling {
 		return ErrInMigration
 	}
 	return OK

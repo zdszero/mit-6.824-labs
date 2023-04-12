@@ -25,7 +25,7 @@ const (
 	ErrInMigration    = "ErrInMigration"
 	ErrDuplicate      = "ErrDuplicate"
 	ErrFinished       = "ErrFinished"
-	Debug             = 1
+	Debug             = 0
 )
 
 type Err string
