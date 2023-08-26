@@ -107,6 +107,7 @@ func (px *Paxos) Start(seq int, v interface{}) {
 	px.propose(seq, v)
 }
 
+// choose the next np for current seq's state
 func (px *Paxos) chooseProposalNumber(seq int) int {
 	px.mu.Lock()
 	n := px.accpState[seq].np
@@ -311,7 +312,7 @@ func (px *Paxos) Done(seq int) {
 	px.mu.Lock()
 	defer px.mu.Unlock()
 
-	if seq < px.doneSeqs[px.me] {
+	if seq > px.doneSeqs[px.me] {
 		px.doneSeqs[px.me] = seq
 	}
 	px.doMemShrink()
