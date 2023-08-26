@@ -147,11 +147,13 @@ func (px *Paxos) prepare(peer string, seq int, n int) (int, interface{}, bool) {
 	if px.isSelf(peer) {
 		return px.prepareHandler(seq, n)
 	} else {
+		px.mu.Lock()
 		args := PrepareArgs{
 			Instance: seq,
 			Proposal: n,
 		}
 		reply := PrepareReply{}
+		px.mu.Unlock()
 		ok := call(peer, "Paxos.Prepare", &args, &reply)
 		if !ok {
 			return 0, nil, false
@@ -205,12 +207,14 @@ func (px *Paxos) accept(peer string, seq int, n int, v interface{}) bool {
 	if px.isSelf(peer) {
 		return px.acceptHandler(seq, n, v)
 	} else {
+		px.mu.Lock()
 		args := AcceptArgs{
 			Instance: seq,
 			Proposal: n,
 			Value:    v,
 		}
 		reply := AcceptReply{}
+		px.mu.Unlock()
 		ok := call(peer, "Paxos.Accept", &args, &reply)
 		if !ok {
 			return false
@@ -220,8 +224,10 @@ func (px *Paxos) accept(peer string, seq int, n int, v interface{}) bool {
 }
 
 func (px *Paxos) decided(peer string, seq int, v interface{}) {
+	px.mu.Lock()
 	if px.isSelf(peer) {
 		px.values[seq] = v
+		px.mu.Unlock()
 	} else {
 		args := DecidedArgs{
 			Sender:   px.me,
@@ -230,6 +236,7 @@ func (px *Paxos) decided(peer string, seq int, v interface{}) {
 			Value:    v,
 		}
 		reply := DecidedReply{}
+		px.mu.Unlock()
 		call(peer, "Paxos.Decided", &args, &reply)
 	}
 }
