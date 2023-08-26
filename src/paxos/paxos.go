@@ -104,14 +104,14 @@ func (px *Paxos) Start(seq int, v interface{}) {
 		px.maxSeqSeen = seq
 	}
 	px.mu.Unlock()
-	px.propose(seq, v)
+	go px.propose(seq, v)
 }
 
 // choose the next np for current seq's state
 func (px *Paxos) chooseProposalNumber(seq int) int {
 	px.mu.Lock()
+	defer px.mu.Unlock()
 	n := px.accpState[seq].np
-	px.mu.Unlock()
 	return n + 1
 }
 
@@ -124,7 +124,7 @@ func (px *Paxos) chooseProposalNumber(seq int) int {
 //	  reply prepare_reject
 func (px *Paxos) prepareHandler(seq int, n int) (na int, v interface{}, ok bool) {
 	px.mu.Lock()
-	px.mu.Unlock()
+	defer px.mu.Unlock()
 	if seq > px.maxSeqSeen {
 		px.maxSeqSeen = seq
 	}
@@ -187,6 +187,8 @@ func (px *Paxos) updateProposalNumber(seq int, n int) bool {
 //	else
 //	  reply accept_reject
 func (px *Paxos) acceptHandler(seq int, n int, v interface{}) bool {
+	px.mu.Lock()
+	defer px.mu.Unlock()
 	state := px.accpState[seq]
 	if n >= state.np {
 		state.np = n
@@ -384,7 +386,9 @@ func (px *Paxos) Status(seq int) (Fate, interface{}) {
 	if seq < px.Min() {
 		return Forgotten, nil
 	}
+	px.mu.Lock()
 	v, ok := px.values[seq]
+	px.mu.Unlock()
 	if ok {
 		return Decided, v
 	}

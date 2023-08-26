@@ -74,10 +74,12 @@ type DecidedReply struct {
 func (px *Paxos) Decided(args *DecidedArgs, reply *DecidedReply) error {
 	px.dprintf("Decided: seq = %d, v = %v\n", args.Instance, args.Value)
 
+	px.mu.Lock()
 	px.values[args.Instance] = args.Value
 	if px.doneSeqs[args.Sender] < args.DoneSeq {
 		px.doneSeqs[args.Sender] = args.DoneSeq
 	}
+	px.mu.Unlock()
 	return nil
 }
 
